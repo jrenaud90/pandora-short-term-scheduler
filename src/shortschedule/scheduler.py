@@ -1018,6 +1018,9 @@ class ScheduleProcessor:
             for visit in working_calendar.visits
             for seq in visit.sequences
         }
+        # Why each boundary moved, filled in by the passes below and read
+        # back by _log_timing_changes.
+        self._timing_notes = {}
 
         # One roll per target per visit, chosen by pandoravisibility and
         # written onto the sequences, so every pass below judges an
@@ -1141,10 +1144,14 @@ class ScheduleProcessor:
                         else "shortened_sequences"
                     )
                 ].append(prefix)
+                notes = getattr(self, "_timing_notes", {}).get(
+                    (visit.id, seq.id), []
+                )
                 self._print(
                     f"{prefix} | {verb}: "
                     + ", ".join(parts)
                     + f" (duration {old_dur:.1f} -> {new_dur:.1f} min)"
+                    + (": " + "; ".join(notes) if notes else "")
                 )
 
         summary = self.gap_report["processing_summary"]
@@ -1157,6 +1164,11 @@ class ScheduleProcessor:
         summary["sequences_modified"] = (
             summary["sequences_lengthened"] + summary["sequences_shortened"]
         )
+
+    def _note_timing(self, visit_id: Any, seq_id: Any, note: str) -> None:
+        """Record why a pass moved a boundary, for ``_log_timing_changes``."""
+        notes = self.__dict__.setdefault("_timing_notes", {})
+        notes.setdefault((visit_id, seq_id), []).append(note)
 
     def _get_synchronized_time_grid(
         self, calendar: ScienceCalendar
@@ -1354,6 +1366,9 @@ class ScheduleProcessor:
                 roll=seq.roll,
             )
             working_cal.replace_sequence(visit_id, seq.id, trimmed)
+            self._note_timing(
+                visit_id, seq.id, f"stop: {tail_length} min dark tail trimmed"
+            )
 
             # Extend the next sequence backward to fill the gap
             if idx + 1 >= len(all_sequences):
@@ -1400,6 +1415,12 @@ class ScheduleProcessor:
             )
             working_cal.replace_sequence(
                 next_visit_id, next_seq.id, extended_next
+            )
+            self._note_timing(
+                next_visit_id,
+                next_seq.id,
+                f"start: grew {gap_minutes - first_contiguous} min into time "
+                f"freed by {seq.target}'s trimmed tail",
             )
             # Update local list so subsequent iterations see
             # the modified next sequence.
@@ -1578,6 +1599,20 @@ class ScheduleProcessor:
 
             working_cal.replace_sequence(visit_id, seq.id, trimmed)
             all_sequences[idx] = (visit_id, trimmed)
+            dropped = [
+                f"{n} min at the {end}"
+                for n, end in (
+                    (best_window[0], "head"),
+                    (len(vis_arr) - best_window[1], "tail"),
+                )
+                if n
+            ]
+            self._note_timing(
+                visit_id,
+                seq.id,
+                "kept the longest visible block, dropping dark "
+                + " and ".join(dropped),
+            )
 
             self._extend_previous_after_mid_trim(
                 working_cal,
@@ -1779,7 +1814,11 @@ class ScheduleProcessor:
             seq.start_time = new_edge
         else:
             seq.stop_time = new_edge
+        boundary = "start" if direction < 0 else "stop"
         if neighbor is None:
+            self._note_timing(
+                visit_id, seq.id, f"{boundary}: grew {gained} min into idle time"
+            )
             return gained, 0
 
         prefix = self._seq_prefix(visit_id, seq)
@@ -1794,6 +1833,22 @@ class ScheduleProcessor:
             self._print(
                 f"{prefix} | GROWTH: took {taken} min from lower-priority "
                 f"{neighbor.target} (priority {neighbor.priority})."
+            )
+            self._note_timing(
+                visit_id,
+                seq.id,
+                f"{boundary}: grew {gained} min, {taken} of them taken from "
+                f"lower-priority {neighbor.target}",
+            )
+            self._note_timing(
+                neighbor_visit,
+                neighbor.id,
+                f"{'stop' if direction < 0 else 'start'}: gave {taken} min "
+                f"to higher-priority {seq.target}",
+            )
+        else:
+            self._note_timing(
+                visit_id, seq.id, f"{boundary}: grew {gained} min into idle time"
             )
 
         # Growth that reached a bound set by a lower-priority neighbor's
@@ -1944,6 +1999,17 @@ class ScheduleProcessor:
                         f"Left unclamped for manual review."
                     )
                     continue
+                for boundary, moved in (
+                    ("start", new_start != seq.start_time),
+                    ("stop", new_stop != seq.stop_time),
+                ):
+                    if moved:
+                        self._note_timing(
+                            visit.id,
+                            seq.id,
+                            f"{boundary}: clamped to the {limit} min "
+                            "movement limit",
+                        )
                 seq.start_time, seq.stop_time = new_start, new_stop
                 clamped += 1
 
@@ -1991,6 +2057,11 @@ class ScheduleProcessor:
             )
             earlier.stop_time = later.start_time
             repaired += 1
+            self._note_timing(
+                visit_id,
+                earlier.id,
+                f"stop: truncated to end an overlap with {later.target}",
+            )
 
         if repaired:
             residual = self.validate_no_overlaps_astropy(
@@ -2084,6 +2155,12 @@ class ScheduleProcessor:
                     f"{prefix} | START BUFFER: start moved later by "
                     f"{offset} min so the observation opens cleanly "
                     f"({reasons})."
+                )
+                self._note_timing(
+                    visit.id,
+                    seq.id,
+                    f"start: moved {offset} min later to open cleanly "
+                    f"({reasons})",
                 )
                 seq.start_time = new_start
 
@@ -2335,6 +2412,12 @@ class ScheduleProcessor:
         )
         working_cal.replace_sequence(prev_visit_id, prev_seq.id, extended_prev)
         all_sequences[idx - 1] = (prev_visit_id, extended_prev)
+        self._note_timing(
+            prev_visit_id,
+            prev_seq.id,
+            f"stop: grew {extend_end} min into time freed by a neighbor's "
+            "trim",
+        )
 
     def _extend_next_after_mid_trim(
         self,
@@ -2384,6 +2467,12 @@ class ScheduleProcessor:
         )
         working_cal.replace_sequence(next_visit_id, next_seq.id, extended_next)
         all_sequences[idx + 1] = (next_visit_id, extended_next)
+        self._note_timing(
+            next_visit_id,
+            next_seq.id,
+            f"start: grew {last_idx + 1 - first_contiguous} min into time "
+            "freed by a neighbor's trim",
+        )
 
     def get_minute_by_minute_assignments(
         self, calendar: ScienceCalendar
@@ -3057,15 +3146,15 @@ class ScheduleProcessor:
             "NumTotalFramesRequested",
             str(int(frames)),
         )
-        if success:
-            self._print(
-                f"{prefix} | VISDA NumTotalFramesRequested "
-                f"'{old_frames}' -> '{int(frames)}'"
-            )
-        else:
+        if not success:
             self._print(
                 f"Warning: {prefix} | Failed to update "
                 f"NumTotalFramesRequested"
+            )
+        elif str(old_frames) != str(int(frames)):
+            self._print(
+                f"{prefix} | VISDA NumTotalFramesRequested "
+                f"'{old_frames}' -> '{int(frames)}'"
             )
         return sequence
 
@@ -3157,14 +3246,14 @@ class ScheduleProcessor:
         success = sequence.set_payload_parameter(
             "AcquireInfCamImages", "SC_Integrations", str(int(integrations))
         )
-        if success:
+        if not success:
+            self._print(
+                f"Warning: {prefix} | Failed to update SC_Integrations"
+            )
+        elif str(old_integrations) != str(int(integrations)):
             self._print(
                 f"{prefix} | NIRDA SC_Integrations "
                 f"'{old_integrations}' -> '{int(integrations)}'"
-            )
-        else:
-            self._print(
-                f"Warning: {prefix} | Failed to update SC_Integrations"
             )
 
         return sequence

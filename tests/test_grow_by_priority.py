@@ -171,3 +171,25 @@ def test_take_at_a_start_backs_off_until_the_opening_can_be_cleaned():
     # 31 the window is clean and B keeps 14, so that is where the take
     # stops, though B's bare floor would have allowed 37.
     assert (_minute(high.stop_time), _minute(low.start_time)) == (31, 31)
+
+
+def test_timing_log_says_why_each_boundary_moved(capsys):
+    proc = _proc()
+    cal = _make_calendar(
+        [_seq("s1", "A", 0, 20, 2), _seq("s2", "B", 20, 40, 1)]
+    )
+    original = _timing(cal)
+    proc._grow_into_free_time(cal, original)
+    capsys.readouterr()
+
+    proc._log_timing_changes(cal, original)
+    out = capsys.readouterr().out
+    assert (
+        "ELONGATED: stop later 32.0 min (duration 20.0 -> 52.0 min): "
+        "stop: grew 32 min, 32 of them taken from lower-priority B"
+    ) in out
+    assert (
+        "ELONGATED: start later 32.0 min, stop later 45.0 min "
+        "(duration 40.0 -> 53.0 min): start: gave 32 min to "
+        "higher-priority A; stop: grew 45 min into idle time"
+    ) in out
