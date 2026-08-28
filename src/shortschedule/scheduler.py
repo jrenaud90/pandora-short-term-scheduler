@@ -841,7 +841,11 @@ class ScheduleProcessor:
             for _, seq in self._ordered_sequences(calendar)
         ]
 
-        for visit in calendar.visits:
+        for visit in self._progress(
+            calendar.visits,
+            desc="Merging same-target observations",
+            total=len(calendar.visits),
+        ):
             # Process sequences in chronological order so "right after each
             # other" is well defined regardless of input ordering.
             ordered = sorted(visit.sequences, key=lambda s: s.start_time)
@@ -1635,7 +1639,9 @@ class ScheduleProcessor:
             walk.sort(key=lambda i: -int(ordered[i][1].priority or 0))
         gained_starts = gained_stops = taken = 0
 
-        for index in walk:
+        for index in self._progress(
+            walk, desc="Growing into idle time", total=len(walk)
+        ):
             visit_id, seq = ordered[index]
             if original_timing.get((visit_id, seq.id)) is None:
                 continue
@@ -2029,7 +2035,11 @@ class ScheduleProcessor:
         the final say. It only ever moves a start later, so it cannot
         create an overlap.
         """
-        for visit in calendar.visits:
+        for visit in self._progress(
+            calendar.visits,
+            desc="Checking start buffers",
+            total=len(calendar.visits),
+        ):
             for seq in visit.sequences:
                 n_mins = int(np.rint(seq.duration.sec / 60.0))
                 if n_mins <= 0:

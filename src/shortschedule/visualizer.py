@@ -2132,14 +2132,20 @@ class ScheduleVisualizer:
 
         # Collect all sequences with per-minute visibility
         rows = []
-        for visit in sorted(
+        visits = sorted(
             calendar.visits,
             key=lambda v: (
                 v.sequences[0].start_time
                 if v.sequences
                 else Time("2000-01-01")
             ),
-        ):
+        )
+        progress = getattr(scheduler, "_progress", None)
+        if progress is not None:
+            visits = progress(
+                visits, desc="Visibility per observation", total=len(visits)
+            )
+        for visit in visits:
             for seq in visit.sequences:
                 n_mins = int(np.rint(seq.duration.sec / 60.0))
                 if n_mins <= 0:
@@ -2701,6 +2707,7 @@ class ScheduleVisualizer:
             self.scheduler.visibility,
             step_minutes=step_minutes,
             idle_euler_deg=idle_euler_deg,
+            progress=getattr(self.scheduler, "_progress", None),
             verbose=verbose,
         )
         self._pointing_cache = (key, timeline)

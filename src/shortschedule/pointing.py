@@ -9,7 +9,7 @@ from `pandoravisibility` rather than being restated.
 """
 
 # Standard library
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 # Third-party
 import numpy as np
@@ -244,6 +244,7 @@ def build_pointing_timeline(
     visibility: Any,
     step_minutes: int = 1,
     idle_euler_deg: Sequence[float] = DARK_IDLE_EULER_DEG,
+    progress: Optional[Callable] = None,
     verbose: bool = False,
 ) -> PointingTimeline:
     """Reconstruct where the spacecraft points for every minute of a week.
@@ -269,6 +270,10 @@ def build_pointing_timeline(
     idle_euler_deg : sequence of float, optional
         ``(roll, pitch, yaw)`` offset of the dark-idle command, in
         degrees.  Defaults to :data:`DARK_IDLE_EULER_DEG`.
+    progress : callable, optional
+        ``progress(iterable, desc=..., total=...)`` returning the iterable
+        wrapped in a progress bar, such as ``ScheduleProcessor._progress``.
+        The per-group star tracker lookups are the slow part of a week.
     verbose : bool, optional
         Print progress and any groups that could not be resolved.
 
@@ -338,8 +343,13 @@ def build_pointing_timeline(
 
     # Observation minutes
     original_roll = getattr(visibility, "roll", None)
+    group_items = list(groups.items())
+    if progress is not None:
+        group_items = progress(
+            group_items, desc="Reconstructing pointing", total=len(group_items)
+        )
     try:
-        for (ra_deg, dec_deg, roll), indices in groups.items():
+        for (ra_deg, dec_deg, roll), indices in group_items:
             index = np.asarray(sorted(indices))
             group_times = times[index]
             coord = SkyCoord(ra_deg, dec_deg, frame="icrs", unit="deg")
