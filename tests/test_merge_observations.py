@@ -25,6 +25,7 @@ from astropy.time import Time
 # First-party/Local
 from shortschedule.models import ObservationSequence, ScienceCalendar, Visit
 from shortschedule.scheduler import ScheduleProcessor
+from tests.doubles import BestRollFromVisibility
 
 # ================================================================
 # Helpers
@@ -225,7 +226,7 @@ class TestMergeSimilarObservations:
 # ================================================================
 
 
-class _DummyVisibilityAllTrue:
+class _DummyVisibilityAllTrue(BestRollFromVisibility):
     """Visibility mock — always visible, ignores roll."""
 
     def __init__(self, l1, l2, **kwargs):
@@ -328,7 +329,7 @@ class TestProcessCalendarMergeKwarg:
 # ================================================================
 
 
-class _DarkGapVis:
+class _DarkGapVis(BestRollFromVisibility):
     """Visibility where a named span is dark for a star-tracker reason.
 
     A brief tracker dropout between two observations of one target is the

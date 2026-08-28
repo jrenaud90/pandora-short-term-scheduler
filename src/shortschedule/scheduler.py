@@ -21,7 +21,7 @@ than sliding observations to close gaps.
 from .models import ObservationSequence, ScienceCalendar, Visit
 from .nirda import NirdaData
 from .overhead import OverheadTiming
-from .roll import apply_rolls_to_calendar, find_best_rolls_for_visit
+from .roll import get_best_roll_per_visit
 from .visda import VisdaData
 
 # Standard library
@@ -166,7 +166,7 @@ class ScheduleProcessor:
         st_earthlimb_min: Optional[float] = None,
         st1_earthlimb_min: Optional[float] = None,
         st2_earthlimb_min: Optional[float] = None,
-        roll_step: float = 2.0,
+        roll_step: float = 1.0,
         min_power_frac: float = 0.7,
         max_movement_minutes: int = 45,
         earthlimb_gap_tolerance: int = 0,
@@ -281,7 +281,7 @@ class ScheduleProcessor:
         st2_earthlimb_min : float, optional
             Additional constraints for star trackers.
         roll_step : float, optional
-            Roll-angle sweep resolution in degrees (default 2.0).
+            Roll-angle sweep resolution in degrees (default 1.0).
         min_power_frac : float, optional
             Minimum acceptable solar-panel power fraction (0-1).
             Roll candidates below this are rejected (default 0.7).
@@ -595,16 +595,6 @@ class ScheduleProcessor:
         # Process sequences
         processed_calendar = self._process_all_sequences(
             windowed_calendar, verbose
-        )
-
-        # Calculate and apply roll angles to all sequences
-        # This ensures all sequences of the same target within a visit
-        # have the same roll angle.  Precomputed visibility-aware rolls
-        # take precedence over the sun-derived default.
-        apply_rolls_to_calendar(
-            processed_calendar,
-            verbose=verbose,
-            precomputed_rolls=self._computed_target_rolls,
         )
 
         # Optionally merge back-to-back same-target sequences within each
@@ -1070,27 +1060,44 @@ class ScheduleProcessor:
             for seq in visit.sequences
         }
 
-        # ── Pre-compute best roll per target per visit ──────────
-        # Only run the sweep when star-tracker constraints are active;
-        # boresight-only constraints are roll-independent.
-        if self._roll_sweep_enabled:
-            for visit in self._progress(
-                working_calendar.visits,
-                desc="Roll sweep",
-                total=len(working_calendar.visits),
-            ):
-                visit_rolls = find_best_rolls_for_visit(
-                    self.visibility,
-                    visit,
-                    roll_step=self.roll_step,
-                    min_power_frac=self.min_power_frac,
-                    priority_0_visibility=getattr(
-                        self, "priority_0_visibility", None
-                    ),
+        # One roll per target per visit, chosen by pandoravisibility and
+        # written onto the sequences, so every pass below judges an
+        # observation at the roll it will fly. The cache mirrors it for the
+        # readers that still look a roll up by visit and target.
+        for visit in self._progress(
+            working_calendar.visits,
+            desc="Roll sweep",
+            total=len(working_calendar.visits),
+        ):
+            visit_rolls = get_best_roll_per_visit(
+                visit,
+                self.visibility,
+                roll_step=self.roll_step,
+                min_power_frac=self.min_power_frac,
+                priority_0_visibility=getattr(
+                    self, "priority_0_visibility", None
+                ),
+                growth_margin_minutes=self.max_movement_minutes,
+            )
+            self._computed_target_rolls[visit.id] = {
+                target: result["roll_deg"]
+                for target, result in visit_rolls.items()
+            }
+            for target, result in visit_rolls.items():
+                self._print(
+                    f"  Visit {visit.id} / {target}: roll "
+                    f"{result['roll_deg']:.1f} deg, "
+                    f"{result['n_scheduled_visible']} of "
+                    f"{int(result['scheduled'].sum())} scheduled minutes "
+                    "visible"
                 )
-                self._computed_target_rolls[visit.id] = visit_rolls
-                for tgt, r in visit_rolls.items():
-                    self._print(f"  Visit {visit.id} / {tgt}: best roll = {r}")
+                if result["n_scheduled_visible"] == 0:
+                    self._print(
+                        f"ERROR: Visit {visit.id} / {target}: no roll "
+                        "makes any scheduled minute visible; flying "
+                        f"{result['roll_deg']:.1f} deg (best for the star "
+                        "trackers alone, then for solar power)"
+                    )
 
         # Observations keep the times the long-term calendar gave them and
         # are adjusted in place. Idle time between them is expected under
@@ -1414,6 +1421,7 @@ class ScheduleProcessor:
                 ra=seq.ra,
                 dec=seq.dec,
                 payload_params=deepcopy(seq.payload_params),
+                roll=seq.roll,
             )
             working_cal.replace_sequence(visit_id, seq.id, trimmed)
 
@@ -1468,6 +1476,7 @@ class ScheduleProcessor:
                 ra=next_seq.ra,
                 dec=next_seq.dec,
                 payload_params=deepcopy(next_seq.payload_params),
+                roll=next_seq.roll,
             )
             working_cal.replace_sequence(
                 next_visit_id, next_seq.id, extended_next
@@ -2225,6 +2234,7 @@ class ScheduleProcessor:
             ra=seq.ra,
             dec=seq.dec,
             payload_params=deepcopy(seq.payload_params),
+            roll=seq.roll,
         )
 
     def _extend_previous_after_mid_trim(
@@ -2273,6 +2283,7 @@ class ScheduleProcessor:
             ra=prev_seq.ra,
             dec=prev_seq.dec,
             payload_params=deepcopy(prev_seq.payload_params),
+            roll=prev_seq.roll,
         )
         working_cal.replace_sequence(prev_visit_id, prev_seq.id, extended_prev)
         all_sequences[idx - 1] = (prev_visit_id, extended_prev)
@@ -2324,6 +2335,7 @@ class ScheduleProcessor:
             ra=next_seq.ra,
             dec=next_seq.dec,
             payload_params=deepcopy(next_seq.payload_params),
+            roll=next_seq.roll,
         )
         working_cal.replace_sequence(next_visit_id, next_seq.id, extended_next)
         all_sequences[idx + 1] = (next_visit_id, extended_next)

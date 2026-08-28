@@ -14,6 +14,7 @@ from astropy.time import Time, TimeDelta
 # First-party/Local
 from shortschedule.models import ObservationSequence, ScienceCalendar, Visit
 from shortschedule.scheduler import ScheduleProcessor
+from tests.doubles import BestRollFromVisibility
 
 T0 = Time("2026-01-01T00:00:00", scale="utc")
 
@@ -47,7 +48,7 @@ def _timing(calendar):
     }
 
 
-class _PatternVis:
+class _PatternVis(BestRollFromVisibility):
     """Visibility driven by a boolean array indexed in minutes from T0.
 
     Dark minutes are modelled as an Earth-limb failure with the star
@@ -86,6 +87,8 @@ def _processor(visibility=None, limit=45, earthlimb_gap_tolerance=0):
     proc = ScheduleProcessor.__new__(ScheduleProcessor)
     proc.visibility = visibility
     proc.max_movement_minutes = limit
+    proc.roll_step = 1.0
+    proc.min_power_frac = None
     proc.min_sequence_duration = TimeDelta(8 * 60 * u.s)
     proc._roll_sweep_enabled = False
     proc._computed_target_rolls = {}
