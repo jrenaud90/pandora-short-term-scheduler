@@ -244,7 +244,6 @@ def build_pointing_timeline(
     visibility: Any,
     step_minutes: int = 1,
     idle_euler_deg: Sequence[float] = DARK_IDLE_EULER_DEG,
-    computed_rolls: Optional[Dict[Any, Dict[str, float]]] = None,
     verbose: bool = False,
 ) -> PointingTimeline:
     """Reconstruct where the spacecraft points for every minute of a week.
@@ -270,9 +269,6 @@ def build_pointing_timeline(
     idle_euler_deg : sequence of float, optional
         ``(roll, pitch, yaw)`` offset of the dark-idle command, in
         degrees.  Defaults to :data:`DARK_IDLE_EULER_DEG`.
-    computed_rolls : dict, optional
-        ``{visit_id: {target: roll_deg}}`` fallback for observations
-        that carry no roll of their own.
     verbose : bool, optional
         Print progress and any groups that could not be resolved.
 
@@ -303,7 +299,6 @@ def build_pointing_timeline(
     # than one call per observation.
     labels = np.full(n_steps, IDLE_LABEL, dtype=object)
     groups: Dict[Tuple[float, float, Optional[float]], List[int]] = {}
-    rolls = computed_rolls or {}
     for visit_id, seq in observations:
         first = int(
             np.rint((seq.start_time - span_start).sec / 60.0 / step_minutes)
@@ -316,10 +311,7 @@ def build_pointing_timeline(
             continue
         labels[indices] = seq.target
 
-        roll = seq.roll
-        if roll is None:
-            roll = rolls.get(visit_id, {}).get(seq.target)
-        key = (round(float(seq.ra), 6), round(float(seq.dec), 6), roll)
+        key = (round(float(seq.ra), 6), round(float(seq.dec), 6), seq.roll)
         groups.setdefault(key, []).extend(indices)
 
     labels = np.array([str(label) for label in labels])

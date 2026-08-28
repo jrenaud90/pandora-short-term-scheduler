@@ -6,6 +6,7 @@
   - Rolls are written onto each observation as soon as they are chosen, before any timing pass, and observations rebuilt by the trim and grow passes now carry their roll.
   - `roll_step` defaults to 1 deg (was 2), since the sweep no longer makes it expensive.
   - The mixed-priority rule is unchanged: a target is scored under the priority-0 model only when every one of its observations in the visit is priority 0.
+  - The per-visit roll cache (`_computed_target_rolls`) and the sweep gate (`_roll_sweep_enabled`) are gone. Every timing pass, `validate_visibility`, the visibility Gantt and the pointing timeline read the roll written on the observation, which removes the three ways the cache could disagree with the delivered calendar: a target renamed after the sweep, a visit renumbered after it, and a calendar loaded from XML on a processor that never ran. `build_pointing_timeline` lost its `computed_rolls` argument.
 
 ## v1.4.0 (2026-08-27)
 - Picks up the `pandoravisibility` v1.3.0 defaults, which are Pandora's flight keepouts rather than a loose starting point.

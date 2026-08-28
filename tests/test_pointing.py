@@ -337,7 +337,6 @@ class _StubScheduler:
 
     def __init__(self, visibility):
         self.visibility = visibility
-        self._computed_target_rolls = {}
 
     def get_gap_report(self):
         return {}

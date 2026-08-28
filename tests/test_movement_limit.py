@@ -90,8 +90,6 @@ def _processor(visibility=None, limit=45, earthlimb_gap_tolerance=0):
     proc.roll_step = 1.0
     proc.min_power_frac = None
     proc.min_sequence_duration = TimeDelta(8 * 60 * u.s)
-    proc._roll_sweep_enabled = False
-    proc._computed_target_rolls = {}
     # Zero tolerance means growth stops at the first dark minute, which
     # keeps most of these tests about bounds rather than about tolerances.
     proc.earthlimb_gap_tolerance = earthlimb_gap_tolerance

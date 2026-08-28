@@ -2140,7 +2140,6 @@ class ScheduleVisualizer:
                 else Time("2000-01-01")
             ),
         ):
-            visit_rolls = scheduler._computed_target_rolls.get(visit.id, {})
             for seq in visit.sequences:
                 n_mins = int(np.rint(seq.duration.sec / 60.0))
                 if n_mins <= 0:
@@ -2149,12 +2148,8 @@ class ScheduleVisualizer:
                 deltas = np.arange(n_mins) * u.min
                 times = seq.start_time + deltas
 
-                # Get the roll written onto the observation
-                roll = (
-                    seq.roll
-                    if seq.roll is not None
-                    else visit_rolls.get(seq.target)
-                )
+                # The roll written onto the observation is the one flown.
+                roll = seq.roll
                 # Judge each bar by the keepouts its own priority flies,
                 # so a stricter priority-0 Earth limb shows up here rather
                 # than the plot disagreeing with the delivered calendar.
@@ -2706,9 +2701,6 @@ class ScheduleVisualizer:
             self.scheduler.visibility,
             step_minutes=step_minutes,
             idle_euler_deg=idle_euler_deg,
-            computed_rolls=getattr(
-                self.scheduler, "_computed_target_rolls", None
-            ),
             verbose=verbose,
         )
         self._pointing_cache = (key, timeline)

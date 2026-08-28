@@ -64,7 +64,6 @@ def _bare_processor(earthlimb_gap_tolerance=0, st_gap_tolerance=0):
     """
     proc = ScheduleProcessor.__new__(ScheduleProcessor)
     proc.visibility = None
-    proc._computed_target_rolls = {}
     proc.earthlimb_gap_tolerance = earthlimb_gap_tolerance
     proc.st_gap_tolerance = st_gap_tolerance
     return proc
