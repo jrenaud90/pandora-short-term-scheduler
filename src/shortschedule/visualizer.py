@@ -2091,13 +2091,15 @@ class ScheduleVisualizer:
         figsize=(14, 8),
         show_sequence_labels=False,
         title="Schedule by Priority — Visibility Overlay",
+        plot_rolls=False,
     ):
         """Gantt chart colored by priority with non-visible minutes
-        overlaid in red.
+        overlaid in black.
 
         Queries the scheduler's ``Visibility`` object per-sequence to
-        compute minute-by-minute visibility and draws red blocks over
-        any minutes that fail a keepout constraint.
+        compute minute-by-minute visibility at the roll each observation
+        will fly, and draws black blocks over any minutes that fail a
+        keepout constraint.
 
         Parameters
         ----------
@@ -2109,6 +2111,10 @@ class ScheduleVisualizer:
             Annotate each bar with the sequence ID.
         title : str
             Plot title.
+        plot_rolls : bool
+            Also paint each observation's prescribed roll on the lower
+            half of its bar, with a colorbar. Off, the whole bar carries
+            the priority color.
 
         Returns
         -------
@@ -2201,32 +2207,33 @@ class ScheduleVisualizer:
             x_min = min(x_min, start_num)
             x_max = max(x_max, stop_num)
 
-            # Each bar is split: priority on the upper half, the roll the
-            # spacecraft will fly on the lower half.
+            # With rolls, each bar is split: priority on the upper half,
+            # the roll the spacecraft will fly on the lower half.
             ax.add_patch(
                 Rectangle(
                     (start_num, y - 0.35),
                     dur_days,
-                    0.34,
+                    0.34 if plot_rolls else 0.7,
                     facecolor=priority_colors.get(seq.priority, "lightgray"),
                     edgecolor="none",
                     linewidth=0,
                 )
             )
-            ax.add_patch(
-                Rectangle(
-                    (start_num, y + 0.01),
-                    dur_days,
-                    0.34,
-                    facecolor=(
-                        "lightgray"
-                        if prescribed_roll is None
-                        else roll_cmap(roll_norm(prescribed_roll))
-                    ),
-                    edgecolor="none",
-                    linewidth=0,
+            if plot_rolls:
+                ax.add_patch(
+                    Rectangle(
+                        (start_num, y + 0.01),
+                        dur_days,
+                        0.34,
+                        facecolor=(
+                            "lightgray"
+                            if prescribed_roll is None
+                            else roll_cmap(roll_norm(prescribed_roll))
+                        ),
+                        edgecolor="none",
+                        linewidth=0,
+                    )
                 )
-            )
 
             # Red overlay for non-visible minutes
             n_mins = len(vis_arr)
@@ -2266,7 +2273,7 @@ class ScheduleVisualizer:
                     seq.id,
                     ha="center",
                     va="center",
-                    fontsize=5,
+                    fontsize=8,
                     clip_on=True,
                 )
 
@@ -2275,12 +2282,13 @@ class ScheduleVisualizer:
         ax.set_xlim(x_min - padding, x_max + padding)
 
         ax.set_yticks(range(len(y_labels)))
-        ax.set_yticklabels(y_labels, fontsize=7)
+        ax.set_yticklabels(y_labels, fontsize=11)
         ax.set_ylim(-0.5, len(y_labels) - 0.5)
         ax.invert_yaxis()
 
         # Time-axis formatting
         self._format_time_axis_safe(ax, calendar)
+        ax.tick_params(axis="x", labelsize=11)
 
         vis_pct = (
             100.0 * (total_mins - non_vis_total) / total_mins
@@ -2297,27 +2305,29 @@ class ScheduleVisualizer:
             f"{total_mins} total — {vis_pct:.1f}% visible)\n"
             f"({total_mins:.0f} observed mins / {span_mins:.0f} total mins "
             f"— {duty_pct:.1f}% duty cycle)",
-            fontsize=12,
+            fontsize=15,
             pad=10,
         )
-        ax.set_xlabel("Time (UTC)")
+        ax.set_xlabel("Time (UTC)", fontsize=13)
         ax.grid(True, axis="x", alpha=0.3)
 
-        # Roll colorbar. Ticks every 90 deg make the cyclic wrap at +/-180
-        # easy to read off. The axes are divided rather than passing ``ax``
-        # to colorbar() so the bar spans the full plot height: sizing it by
-        # ``fraction`` leaves the length tied to the figure aspect, which on
-        # a tall Gantt leaves it floating in the middle.
-        mappable = ScalarMappable(norm=roll_norm, cmap=roll_cmap)
-        mappable.set_array([])
-        colorbar_axes = make_axes_locatable(ax).append_axes(
-            "right", size="1.5%", pad=0.12, axes_class=plt.Axes
-        )
-        colorbar = fig.colorbar(
-            mappable, cax=colorbar_axes, ticks=[-180, -90, 0, 90, 180]
-        )
-        colorbar.set_label("Prescribed roll (deg)", fontsize=9)
-        colorbar.ax.tick_params(labelsize=7)
+        if plot_rolls:
+            # Roll colorbar. Ticks every 90 deg make the cyclic wrap at
+            # +/-180 easy to read off. The axes are divided rather than
+            # passing ``ax`` to colorbar() so the bar spans the full plot
+            # height: sizing it by ``fraction`` leaves the length tied to
+            # the figure aspect, which on a tall Gantt leaves it floating
+            # in the middle.
+            mappable = ScalarMappable(norm=roll_norm, cmap=roll_cmap)
+            mappable.set_array([])
+            colorbar_axes = make_axes_locatable(ax).append_axes(
+                "right", size="1.5%", pad=0.12, axes_class=plt.Axes
+            )
+            colorbar = fig.colorbar(
+                mappable, cax=colorbar_axes, ticks=[-180, -90, 0, 90, 180]
+            )
+            colorbar.set_label("Prescribed roll (deg)", fontsize=13)
+            colorbar.ax.tick_params(labelsize=11)
 
         # Legend
         legend_items = [
@@ -2330,9 +2340,9 @@ class ScheduleVisualizer:
         ax.legend(
             handles=legend_items,
             loc="upper right",
-            fontsize=7,
-            title="upper half: priority\nlower half: roll",
-            title_fontsize=7,
+            fontsize=11,
+            title="upper half: priority\nlower half: roll" if plot_rolls else None,
+            title_fontsize=11,
         )
 
         # Reserve a margin at the top: the title runs to three lines and

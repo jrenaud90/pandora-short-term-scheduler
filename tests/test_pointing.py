@@ -445,3 +445,19 @@ def test_illumination_follows_the_model_reference_point():
     assert not np.allclose(
         limb.illumination["Boresight"], limb.illumination["ST1"]
     )
+
+
+def test_visibility_gantt_paints_rolls_only_on_request():
+    """Off by default the bar is all priority and there is no colorbar."""
+    from shortschedule.scheduler import ScheduleProcessor
+
+    visualizer = ScheduleVisualizer(ScheduleProcessor(TLE1, TLE2))
+    calendar = _make_calendar()
+
+    plain = visualizer.plot_gantt_with_visibility(calendar)
+    assert len(plain.axes) == 1
+
+    with_rolls = visualizer.plot_gantt_with_visibility(
+        calendar, plot_rolls=True
+    )
+    assert len(with_rolls.axes) == 2
