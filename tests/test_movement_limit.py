@@ -82,6 +82,9 @@ class _PatternVis(BestRollFromVisibility):
     def get_star_tracker_breakdown(self, coord, time, roll=None, pre=None):
         return {"passed": {"combined": True}}
 
+    def get_constraint(self, coord, body, times):
+        return self.get_visibility(coord, times)
+
 
 def _processor(visibility=None, limit=45, earthlimb_gap_tolerance=0):
     proc = ScheduleProcessor.__new__(ScheduleProcessor)

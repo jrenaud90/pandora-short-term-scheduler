@@ -169,6 +169,7 @@ class ScheduleProcessor:
         roll_step: float = 1.0,
         min_power_frac: float = 0.7,
         max_movement_minutes: int = 45,
+        grow_by_priority: bool = True,
         earthlimb_gap_tolerance: int = 0,
         earthlimb_gap_tolerance_start_buffer: int = 7.5,
         st_gap_tolerance: int = 0,
@@ -294,6 +295,12 @@ class ScheduleProcessor:
             or that the long-term scheduler should be adjusted. In either
             case it requires further SOC investigation and should not be
             allowed by the short-term scheduler. Set to 0 to disable clamping.
+        grow_by_priority : bool, optional
+            Grow observations priority 2 first, then 1, then 0, and let a
+            higher priority take minutes from an adjacent lower-priority
+            observation as long as that one keeps the minimum duration and
+            stays within ``max_movement_minutes`` (default True). False
+            grows in start-time order with every neighbor a hard bound.
         earthlimb_gap_tolerance : int, optional
             Maximum number of contiguous minutes of earth-limb
             visibility violations to tolerate within a sequence
@@ -380,6 +387,7 @@ class ScheduleProcessor:
 
         # Furthest either boundary may drift from its long-term time.
         self.max_movement_minutes = max_movement_minutes
+        self.grow_by_priority = grow_by_priority
 
         # Gap tolerance: maximum contiguous non-visible minutes to allow
         self.earthlimb_gap_tolerance = earthlimb_gap_tolerance
@@ -932,7 +940,7 @@ class ScheduleProcessor:
 
         The gap is not necessarily dark throughout: growth stops at the
         first minute it cannot use, so a visible minute can be left stranded
-        against the neighbour. The tolerance is therefore judged on the dark
+        against the neighbor. The tolerance is therefore judged on the dark
         minutes the merge would actually swallow, classified at the first of
         them, rather than on the whole gap measured from its first minute.
         """
@@ -1511,8 +1519,8 @@ class ScheduleProcessor:
         sequence to be trimmed to its longest acceptable span — the
         longest contiguous window that contains only tolerable gaps.
 
-        After trimming, the method attempts to extend neighbouring
-        sequences to reclaim the freed time (where those neighbours
+        After trimming, the method attempts to extend neighboring
+        sequences to reclaim the freed time (where those neighbors
         are visible).
         """
         working_cal = deepcopy(calendar)
@@ -1605,78 +1613,215 @@ class ScheduleProcessor:
 
         This grows each observation outward into the idle time around it for
         as long as the target stays visible at its scheduled roll, bounded by:
-        - the neighbouring observations, so growth can never create an
+        - the neighboring observations, so growth can never create an
           overlap, and
         - ``max_movement_minutes`` either side of the long-term start and
           stop, so an observation grows in place instead of drifting.
 
-        Observations are handled in start-time order and each is bounded by
-        its neighbours' current boundaries, so a stop that has already grown
-        is accounted for when the next observation's start is considered.
-        Times are modified in place.
+        With ``grow_by_priority`` the walk runs priority 2 first, then 1,
+        then 0, and a lower-priority neighbor is a soft bound: the grower
+        may take its minutes while the neighbor keeps
+        ``min_sequence_duration`` and the moved boundary stays within
+        ``max_movement_minutes`` of the neighbor's long-term time. Growth
+        that visibility allowed but such a floor refused goes to the error
+        log. Off, the walk is start-time order and every neighbor is a
+        hard bound. Either way a boundary that has already moved is what
+        the next observation sees. Times are modified in place.
         """
-        limit = getattr(self, "max_movement_minutes", 0) or 0
         ordered = self._ordered_sequences(calendar)
-        gained_starts = 0
-        gained_stops = 0
+        walk = list(range(len(ordered)))
+        if getattr(self, "grow_by_priority", False):
+            # Highest priority first; start-time order within a priority.
+            walk.sort(key=lambda i: -int(ordered[i][1].priority or 0))
+        gained_starts = gained_stops = taken = 0
 
-        for index, (visit_id, seq) in enumerate(ordered):
-            original = original_timing.get((visit_id, seq.id))
-            if original is None:
+        for index in walk:
+            visit_id, seq = ordered[index]
+            if original_timing.get((visit_id, seq.id)) is None:
                 continue
-            target_coord = SkyCoord(seq.ra, seq.dec, frame="icrs", unit="deg")
-
-            # Grow the start earlier
-            earliest = original[0] - limit * u.min
-            if index > 0:
-                earliest = max(earliest, ordered[index - 1][1].stop_time)
-            room = int((seq.start_time - earliest).sec // 60)
-            if room > 0:
-                # Walk backwards a minute at a time from the current start.
-                times = seq.start_time - np.arange(1, room + 1) * u.min
-                visible = self._visibility_for_sequence(
-                    seq, target_coord, times
-                )
-                gained = self._growable_minutes(
-                    visible,
-                    times,
-                    target_coord,
-                    seq.roll,
-                    visibility=self._visibility_for_priority(seq.priority),
-                )
-                if gained:
-                    seq.start_time = seq.start_time - gained * u.min
-                    gained_starts += gained
-
-            # Grow the stop later
-            latest = original[1] + limit * u.min
-            if index + 1 < len(ordered):
-                latest = min(latest, ordered[index + 1][1].start_time)
-            room = int((latest - seq.stop_time).sec // 60)
-            if room > 0:
-                times = seq.stop_time + np.arange(room) * u.min
-                visible = self._visibility_for_sequence(
-                    seq, target_coord, times
-                )
-                gained = self._growable_minutes(
-                    visible,
-                    times,
-                    target_coord,
-                    seq.roll,
-                    visibility=self._visibility_for_priority(seq.priority),
-                )
-                if gained:
-                    seq.stop_time = seq.stop_time + gained * u.min
-                    gained_stops += gained
+            gained, took = self._grow_one_side(
+                ordered, index, -1, original_timing
+            )
+            gained_starts += gained
+            taken += took
+            gained, took = self._grow_one_side(
+                ordered, index, 1, original_timing
+            )
+            gained_stops += gained
+            taken += took
 
         summary = self.gap_report["processing_summary"]
         summary["minutes_grown_at_starts"] = gained_starts
         summary["minutes_grown_at_stops"] = gained_stops
+        summary["minutes_taken_from_lower_priority"] = taken
         self._print(
             f"Grew observations into idle time: {gained_starts} min added "
-            f"at starts, {gained_stops} min added at stops."
+            f"at starts, {gained_stops} min added at stops, {taken} min of "
+            "that taken from lower-priority neighbors."
         )
         return calendar
+
+    def _grow_one_side(
+        self,
+        ordered: List[Tuple[str, ObservationSequence]],
+        index: int,
+        direction: int,
+        original_timing: Dict[Any, Any],
+    ) -> Tuple[int, int]:
+        """Grow one boundary of ``ordered[index]``.
+
+        ``direction`` -1 grows the start earlier, +1 the stop later; see
+        ``_grow_into_free_time`` for the rules. Returns the minutes gained
+        and how many of those came out of a lower-priority neighbor.
+        """
+        limit = getattr(self, "max_movement_minutes", 0) or 0
+        visit_id, seq = ordered[index]
+        original = original_timing[(visit_id, seq.id)]
+        if direction < 0:
+            edge, bound = seq.start_time, original[0] - limit * u.min
+        else:
+            edge, bound = seq.stop_time, original[1] + limit * u.min
+        own_bound = bound
+
+        # The neighbor on this side, and how far into it the grower may
+        # reach: not at all unless growth is by priority and the neighbor
+        # ranks lower, and then only while the neighbor keeps its minimum
+        # duration once the start-buffer pass has cleaned its opening, and
+        # its moved boundary stays within the movement limit.
+        neighbor = None
+        takeable = False
+        neighbor_index = index + direction
+        if 0 <= neighbor_index < len(ordered):
+            neighbor_visit, neighbor = ordered[neighbor_index]
+            neighbor_original = original_timing.get(
+                (neighbor_visit, neighbor.id)
+            )
+            takeable = (
+                bool(getattr(self, "grow_by_priority", False))
+                and neighbor_original is not None
+                and int(neighbor.priority or 0) < int(seq.priority or 0)
+            )
+            reach = neighbor.stop_time if direction < 0 else neighbor.start_time
+            if takeable:
+                n_neighbor = int(np.rint(neighbor.duration.sec / 60.0))
+                min_minutes = int(
+                    np.rint(self.min_sequence_duration.sec / 60.0)
+                )
+                requirements = self._start_buffer_requirements(
+                    neighbor,
+                    neighbor.start_time + np.arange(n_neighbor) * u.min,
+                    SkyCoord(
+                        neighbor.ra, neighbor.dec, frame="icrs", unit="deg"
+                    ),
+                )
+            if takeable and direction < 0:
+                # Its stop may come back to where its cleaned opening plus
+                # the minimum duration ends.
+                opening = self._first_clean_start(requirements, n_neighbor)
+                floor = max(
+                    neighbor.start_time
+                    + ((opening or 0) + min_minutes) * u.min,
+                    neighbor_original[1] - limit * u.min,
+                )
+                reach = min(reach, floor)
+            elif takeable:
+                # Its start may go forward as far as the buffer pass, once
+                # it has cleaned the new opening, can still leave it the
+                # minimum.
+                latest = neighbor_original[0] + limit * u.min
+                take = min(
+                    n_neighbor - min_minutes,
+                    int(np.rint((latest - neighbor.start_time).sec) // 60),
+                )
+                while take > 0:
+                    landing = self._first_clean_start(
+                        [(name, buf, ok[take:]) for name, buf, ok in requirements],
+                        n_neighbor - take,
+                    )
+                    if (
+                        landing is not None
+                        and n_neighbor - take - landing >= min_minutes
+                    ):
+                        break
+                    take -= 1
+                reach = max(reach, neighbor.start_time + max(take, 0) * u.min)
+            bound = max(bound, reach) if direction < 0 else min(bound, reach)
+
+        # Whole seconds before the floor division: a bound built from the
+        # neighbor's long-term time can come out a nanosecond short of the
+        # minute and would otherwise lose a whole minute of room.
+        room = int(np.rint((direction * (bound - edge)).sec) // 60)
+        if room <= 0:
+            return 0, 0
+        if direction < 0:
+            times = edge - np.arange(1, room + 1) * u.min
+        else:
+            times = edge + np.arange(room) * u.min
+        target_coord = SkyCoord(seq.ra, seq.dec, frame="icrs", unit="deg")
+        model = self._visibility_for_priority(seq.priority)
+        gained = self._growable_minutes(
+            self._visibility_for_sequence(seq, target_coord, times),
+            times,
+            target_coord,
+            seq.roll,
+            visibility=model,
+        )
+        if gained <= 0:
+            return 0, 0
+        new_edge = edge + direction * gained * u.min
+        if direction < 0:
+            seq.start_time = new_edge
+        else:
+            seq.stop_time = new_edge
+        if neighbor is None:
+            return gained, 0
+
+        prefix = self._seq_prefix(visit_id, seq)
+        taken = 0
+        if direction < 0 and new_edge < neighbor.stop_time:
+            taken = int(np.rint((neighbor.stop_time - new_edge).sec / 60.0))
+            neighbor.stop_time = new_edge
+        elif direction > 0 and new_edge > neighbor.start_time:
+            taken = int(np.rint((new_edge - neighbor.start_time).sec / 60.0))
+            neighbor.start_time = new_edge
+        if taken:
+            self._print(
+                f"{prefix} | GROWTH: took {taken} min from lower-priority "
+                f"{neighbor.target} (priority {neighbor.priority})."
+            )
+
+        # Growth that reached a bound set by a lower-priority neighbor's
+        # floor, with visibility allowing more, is reported. A bound set by
+        # the grower's own movement limit, or by an equal or higher
+        # neighbor, is the rule working as intended.
+        if not (takeable and gained == room and bound != own_bound):
+            return gained, taken
+        extra_room = int(np.rint((direction * (own_bound - bound)).sec) // 60)
+        if extra_room <= 0:
+            return gained, taken
+        if direction < 0:
+            extra_times = bound - np.arange(1, extra_room + 1) * u.min
+        else:
+            extra_times = bound + np.arange(extra_room) * u.min
+        extra = self._growable_minutes(
+            self._visibility_for_sequence(seq, target_coord, extra_times),
+            extra_times,
+            target_coord,
+            seq.roll,
+            visibility=model,
+        )
+        if extra > 0:
+            side = "before its start" if direction < 0 else "after its stop"
+            self._print(
+                f"ERROR: {prefix} | GROWTH BLOCKED: visibility allows "
+                f"{extra} more min {side}, but taking them would leave "
+                f"lower-priority {neighbor.target} (priority "
+                f"{neighbor.priority}) under "
+                f"{self.min_sequence_duration.sec / 60:.0f} min once its "
+                f"opening is cleaned, or past its {limit} min movement "
+                "limit."
+            )
+        return gained, taken
 
     def _growable_minutes(
         self,
@@ -1884,15 +2029,6 @@ class ScheduleProcessor:
         the final say. It only ever moves a start later, so it cannot
         create an overlap.
         """
-        st_buffer = int(getattr(self, "st_gap_tolerance_start_buffer", 0) or 0)
-        earthlimb_buffer = int(
-            getattr(self, "earthlimb_gap_tolerance_start_buffer", 0) or 0
-        )
-        if not getattr(self.visibility, "_st_constraint_active", False):
-            st_buffer = 0
-        if st_buffer <= 0 and earthlimb_buffer <= 0:
-            return calendar
-
         for visit in calendar.visits:
             for seq in visit.sequences:
                 n_mins = int(np.rint(seq.duration.sec / 60.0))
@@ -1903,42 +2039,9 @@ class ScheduleProcessor:
                     seq.ra, seq.dec, frame="icrs", unit="deg"
                 )
                 times = seq.start_time + np.arange(n_mins) * u.min
-                roll = None if seq.roll is None else seq.roll * u.deg
-
-                model = self._visibility_for_priority(seq.priority)
-                requirements = []
-                if st_buffer > 0:
-                    try:
-                        breakdown = model.get_star_tracker_breakdown(
-                            target_coord, times, roll=roll
-                        )
-                    except Exception:
-                        breakdown = None
-                    if breakdown is not None:
-                        requirements.append(
-                            (
-                                "star trackers are not settled",
-                                st_buffer,
-                                np.atleast_1d(
-                                    np.asarray(breakdown["passed"]["combined"])
-                                ),
-                            )
-                        )
-                if earthlimb_buffer > 0:
-                    try:
-                        clear = model.get_constraint(
-                            target_coord, "earthlimb", times
-                        )
-                    except Exception:
-                        clear = None
-                    if clear is not None:
-                        requirements.append(
-                            (
-                                "the boresight is inside the Earth limb",
-                                earthlimb_buffer,
-                                np.atleast_1d(np.asarray(clear)),
-                            )
-                        )
+                requirements = self._start_buffer_requirements(
+                    seq, times, target_coord
+                )
                 if not requirements:
                     continue
 
@@ -1975,6 +2078,61 @@ class ScheduleProcessor:
                 seq.start_time = new_start
 
         return calendar
+
+    def _start_buffer_requirements(
+        self,
+        seq: ObservationSequence,
+        times: Any,
+        target_coord: SkyCoord,
+    ) -> List[Tuple[str, int, np.ndarray]]:
+        """The per-minute checks ``_enforce_start_buffers`` holds ``seq`` to.
+
+        Each is ``(reason, buffer_minutes, ok_per_minute)`` over ``times``,
+        judged under the model the sequence's priority flies at its roll.
+        Empty when no buffer is configured or a check cannot be asked of
+        the model, in which case the opening is not judged at all.
+        """
+        st_buffer = int(getattr(self, "st_gap_tolerance_start_buffer", 0) or 0)
+        earthlimb_buffer = int(
+            getattr(self, "earthlimb_gap_tolerance_start_buffer", 0) or 0
+        )
+        if not getattr(self.visibility, "_st_constraint_active", False):
+            st_buffer = 0
+        model = self._visibility_for_priority(seq.priority)
+        roll = None if seq.roll is None else seq.roll * u.deg
+
+        requirements = []
+        if st_buffer > 0:
+            try:
+                breakdown = model.get_star_tracker_breakdown(
+                    target_coord, times, roll=roll
+                )
+            except Exception:
+                breakdown = None
+            if breakdown is not None:
+                requirements.append(
+                    (
+                        "star trackers are not settled",
+                        st_buffer,
+                        np.atleast_1d(
+                            np.asarray(breakdown["passed"]["combined"])
+                        ),
+                    )
+                )
+        if earthlimb_buffer > 0:
+            try:
+                clear = model.get_constraint(target_coord, "earthlimb", times)
+            except Exception:
+                clear = None
+            if clear is not None:
+                requirements.append(
+                    (
+                        "the boresight is inside the Earth limb",
+                        earthlimb_buffer,
+                        np.atleast_1d(np.asarray(clear)),
+                    )
+                )
+        return requirements
 
     @staticmethod
     def _first_clean_start(
@@ -3735,6 +3893,7 @@ class ScheduleProcessor:
                 self.st_gap_tolerance_start_buffer
             ),
             "Max_Movement_Min": str(self.max_movement_minutes),
+            "Grow_By_Priority": str(self.grow_by_priority),
             "Roll_Step_Deg": f"{float(self.roll_step):g}",
             "Min_Power_Frac": f"{float(self.min_power_frac):g}",
         }
@@ -3937,6 +4096,7 @@ class ScheduleProcessor:
                 "sequences_shortened": 0,
                 "minutes_grown_at_starts": 0,
                 "minutes_grown_at_stops": 0,
+                "minutes_taken_from_lower_priority": 0,
                 "boundaries_clamped": 0,
                 "overlaps_repaired": 0,
                 "original_gap_time_minutes": 0,
