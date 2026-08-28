@@ -423,3 +423,25 @@ class TestPointingPlots:
 
         assert drawn == expected
         assert sum(drawn) == len(timeline.times)
+
+
+def test_illumination_follows_the_model_reference_point():
+    """The illumination angle is taken where the model measures it.
+
+    Sub-satellite (the library default) is target independent, so every
+    axis reads the same value; the grazed-limb mode differs per axis.
+    """
+    calendar = _make_calendar()
+    subsatellite = build_pointing_timeline(calendar, _visibility())
+    np.testing.assert_array_equal(
+        subsatellite.illumination["Boresight"],
+        subsatellite.illumination["ST1"],
+    )
+    assert 64.0 < subsatellite.earth_radius_deg < 68.0
+
+    limb = build_pointing_timeline(
+        calendar, Visibility(TLE1, TLE2, daynight_mode="limb")
+    )
+    assert not np.allclose(
+        limb.illumination["Boresight"], limb.illumination["ST1"]
+    )

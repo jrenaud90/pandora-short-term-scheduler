@@ -1706,7 +1706,7 @@ class ScheduleVisualizer:
         show_sequence_labels=False,
         title="Schedule by Priority",
     ):
-        """Create a Gantt chart of the calendar coloured by priority.
+        """Create a Gantt chart of the calendar colored by priority.
 
         Always returns a single ``Figure``, whatever the calendar spans, so
         callers can rely on ``fig.savefig(...)``. Splitting a long calendar
@@ -2718,7 +2718,7 @@ class ScheduleVisualizer:
 
         Up to 25 targets can appear in a week, so the 12-color palettes
         are not enough. This walks tab20/tab20b/tab20c taking every
-        other entry first, which keeps neighbouring targets far apart in
+        other entry first, which keeps neighboring targets far apart in
         hue rather than landing on the light/dark pairs those maps are
         built from.  Colors key off the sorted target name so a target
         keeps its color when the calendar is reprocessed.
@@ -2737,7 +2737,7 @@ class ScheduleVisualizer:
         for name in ("tab20", "tab20b", "tab20c"):
             colors = list(plt.get_cmap(name).colors)
             palette.extend(colors[0::2] + colors[1::2])
-        # Drop the greys: black means idle, and a grey target next to it
+        # Drop the grays: black means idle, and a gray target next to it
         # in the legend is indistinguishable.
         palette = [
             color
@@ -2794,7 +2794,7 @@ class ScheduleVisualizer:
             for target in sorted(timeline.targets)
         ]
         # Solid in the legend even though it is drawn faint, so the
-        # swatch cannot be mistaken for a grey target.
+        # swatch cannot be mistaken for a gray target.
         handles.append(
             Line2D(
                 [0],
@@ -2893,7 +2893,7 @@ class ScheduleVisualizer:
         A 3x3 grid: one row per body, one column per pointing direction.
         The Sun and Moon rows carry the keep-out actually configured on
         the ``Visibility`` instance as a dashed line.  The Earth row is
-        the angle to the Earth *centre*, so no line is drawn there --
+        the angle to the Earth *center*, so no line is drawn there --
         the Earth keep-outs are measured from the limb, whose half-angle
         moves with altitude.
 
@@ -2921,8 +2921,8 @@ class ScheduleVisualizer:
         visibility = self.scheduler.visibility
 
         # The keep-out each panel should be read against.  Only the
-        # body-centre limits belong here; the Earth limits are limb
-        # relative and cannot be drawn on an Earth-centre axis.
+        # body-center limits belong here; the Earth limits are limb
+        # relative and cannot be drawn on an Earth-center axis.
         limits = {
             ("Boresight", "sun"): getattr(visibility, "sun_min", None),
             ("Boresight", "moon"): getattr(visibility, "moon_min", None),
@@ -2983,7 +2983,7 @@ class ScheduleVisualizer:
                     ax.set_title(axis, fontsize=11, fontweight="bold")
                 if col == 0:
                     ax.set_ylabel(
-                        f"{'Earth centre' if body == 'earth' else body.title()}"
+                        f"{'Earth center' if body == 'earth' else body.title()}"
                         " angle (deg)"
                     )
 
@@ -3007,16 +3007,27 @@ class ScheduleVisualizer:
         calendar,
         figsize=(16, 6),
         step_minutes=1,
-        title="Earth Angle vs Limb Illumination",
+        title="Earth Angle vs Illumination",
     ):
-        """Earth-centre angle against how lit the grazed limb point is.
+        """Angle to the Earth center against the Earth illumination angle.
 
-        The illumination angle is the solar zenith angle where the
-        pointing direction meets the Earth: 0 deg is the sub-solar point
-        (brightest possible limb), 90 deg the terminator, 180 deg a
-        fully dark limb.  It is the same quantity that drives the
-        dynamic DPC keep-out wedge, so the left of each panel is where
-        the Earth keep-out is at its most restrictive.
+        One panel per pointing direction, with the Earth keep-out that
+        direction is held to drawn in the same coordinates, so a point
+        left of the line is inside its keep-out.  The boresight carries
+        the dynamic DPC wedge when ``use_dynamic_earthlimb`` is set (110,
+        82 and 75 deg from the Earth center at 78, 89 and 90 deg of
+        illumination), otherwise its day/night pair or flat limb angle,
+        plus the flat priority-0 limb when one is configured.  A star
+        tracker's Earth-limb keep-out does not vary with illumination, so
+        it is a vertical line.
+
+        The illumination angle is the solar zenith angle at the Earth
+        reference point the visibility model uses (``daynight_mode``): the
+        sub-satellite point directly below the spacecraft by default, or
+        the limb point each direction grazes.  0 deg is the sub-solar
+        point, 90 deg the terminator, 180 deg the anti-solar point.
+        Keep-outs given above the limb are placed with the mean Earth
+        angular radius over the span.
 
         Dots are transparent so repeated visits to the same phase space
         stack up visibly.
@@ -3036,12 +3047,39 @@ class ScheduleVisualizer:
         -------
         matplotlib.figure.Figure
         """
+        from pandoravisibility import Visibility
+
         from .pointing import AXES, IDLE_LABEL
 
         timeline = self.get_pointing_timeline(
             calendar, step_minutes=step_minutes
         )
         colors = self._get_pointing_colors(timeline.targets)
+        visibility = self.scheduler.visibility
+        radius = timeline.earth_radius_deg
+        illumination = np.linspace(0.0, 180.0, 361)
+
+        # The boresight Earth limb limits, in degrees above the limb, the
+        # way pandoravisibility resolves them: the day/night pair falls
+        # back to the flat angle for whichever side is unset.
+        limb = {
+            name: (
+                None
+                if getattr(visibility, name, None) is None
+                else float(
+                    getattr(getattr(visibility, name), "value",
+                            getattr(visibility, name))
+                )
+            )
+            for name in (
+                "earthlimb_min", "earthlimb_day_min", "earthlimb_night_min"
+            )
+        }
+        strict = getattr(
+            getattr(self.scheduler, "priority_0_visibility", None),
+            "earthlimb_min",
+            None,
+        )
 
         fig, axes = plt.subplots(
             1, len(AXES), figsize=figsize, sharex=True, sharey=True
@@ -3049,8 +3087,8 @@ class ScheduleVisualizer:
         for ax, axis in zip(np.atleast_1d(axes), AXES):
             idle = timeline.labels == IDLE_LABEL
             ax.scatter(
-                timeline.illumination[axis][idle],
                 timeline.angles[(axis, "earth")][idle],
+                timeline.illumination[axis][idle],
                 s=9,
                 color="black",
                 alpha=0.12,
@@ -3059,33 +3097,101 @@ class ScheduleVisualizer:
             for target in sorted(timeline.targets):
                 mask = timeline.labels == target
                 ax.scatter(
-                    timeline.illumination[axis][mask],
                     timeline.angles[(axis, "earth")][mask],
+                    timeline.illumination[axis][mask],
                     s=11,
                     color=colors[target],
                     alpha=0.35,
                     linewidths=0,
                 )
-            ax.axvline(90.0, color="gray", linestyle=":", linewidth=1.0)
+            ax.axhline(90.0, color="gray", linestyle=":", linewidth=1.0)
+
+            # (x, y, style, label) of each keep-out line for this panel.
+            lines = []
+            if axis == "Boresight":
+                if getattr(visibility, "use_dynamic_earthlimb", False):
+                    lines.append((
+                        Visibility._dynamic_earthlimb_min_deg(illumination)
+                        + radius,
+                        illumination,
+                        "--",
+                        "DPC wedge: 110 / 82 / 75 deg from the Earth center",
+                    ))
+                elif limb["earthlimb_min"] is not None:
+                    day = limb["earthlimb_day_min"] or limb["earthlimb_min"]
+                    night = (
+                        limb["earthlimb_night_min"] or limb["earthlimb_min"]
+                    )
+                    lines.append((
+                        np.where(illumination < 90.0, day, night) + radius,
+                        illumination,
+                        "--",
+                        f"Earth limb: {day:.0f} deg day, {night:.0f} deg "
+                        "night above the limb"
+                        if day != night
+                        else f"Earth limb: {day:.0f} deg above the limb",
+                    ))
+                if strict is not None:
+                    strict_deg = float(getattr(strict, "value", strict))
+                    lines.append((
+                        np.full_like(illumination, strict_deg + radius),
+                        illumination,
+                        ":",
+                        f"priority 0: {strict_deg:.0f} deg above the limb",
+                    ))
+            elif hasattr(visibility, "_st_earthlimb_min_for"):
+                tracker_limit = visibility._st_earthlimb_min_for(
+                    1 if axis == "ST1" else 2
+                )
+                tracker_deg = float(
+                    getattr(tracker_limit, "value", tracker_limit)
+                )
+                if tracker_deg > 0:
+                    lines.append((
+                        np.full_like(illumination, tracker_deg + radius),
+                        illumination,
+                        "--",
+                        f"star tracker Earth limb: {tracker_deg:.0f} deg "
+                        "above the limb",
+                    ))
+            for x, y, style, label in lines:
+                ax.plot(
+                    x, y, color="crimson", linestyle=style, linewidth=1.4,
+                    zorder=5, label=label,
+                )
+            if lines:
+                ax.legend(loc="lower right", fontsize=7)
+
             ax.set_title(axis, fontsize=11, fontweight="bold")
-            ax.set_xlabel("Limb illumination angle (deg)")
+            ax.set_xlabel("Angle to Earth center (deg)")
             ax.set_xlim(0, 180)
-            ax.set_ylim(0, 180)
             ax.grid(True, alpha=0.3)
 
-        np.atleast_1d(axes)[0].set_ylabel("Angle to Earth centre (deg)")
+        lit = np.concatenate([timeline.illumination[axis] for axis in AXES])
+        np.atleast_1d(axes)[0].set_ylim(
+            max(0.0, np.nanmin(lit) - 5.0), min(180.0, np.nanmax(lit) + 5.0)
+        )
+        reference = (
+            "sub-satellite point"
+            if getattr(visibility, "daynight_mode", "subsatellite")
+            == "subsatellite"
+            else "grazed limb point"
+        )
+        np.atleast_1d(axes)[0].set_ylabel(
+            f"Earth illumination angle at the {reference} (deg)"
+        )
         np.atleast_1d(axes)[0].text(
-            90.0,
-            176.0,
+            2.0,
+            90.5,
             "terminator",
             fontsize=7,
             color="gray",
-            ha="center",
-            va="top",
+            ha="left",
+            va="bottom",
         )
         fig.suptitle(
-            f"{title}\nLeft is a sunlit limb, right is a dark limb; "
-            "low on the y axis is pointed at the Earth.",
+            f"{title}\nLeft of a line is inside that direction's Earth "
+            "keep-out; higher on the y axis, the Earth below is darker.",
             fontsize=13,
         )
         self._add_pointing_legend(fig, timeline, colors)
