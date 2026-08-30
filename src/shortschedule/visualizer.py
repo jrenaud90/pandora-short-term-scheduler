@@ -2273,7 +2273,7 @@ class ScheduleVisualizer:
                     seq.id,
                     ha="center",
                     va="center",
-                    fontsize=8,
+                    fontsize=11,
                     clip_on=True,
                 )
 
@@ -2282,13 +2282,13 @@ class ScheduleVisualizer:
         ax.set_xlim(x_min - padding, x_max + padding)
 
         ax.set_yticks(range(len(y_labels)))
-        ax.set_yticklabels(y_labels, fontsize=11)
+        ax.set_yticklabels(y_labels, fontsize=16)
         ax.set_ylim(-0.5, len(y_labels) - 0.5)
         ax.invert_yaxis()
 
         # Time-axis formatting
         self._format_time_axis_safe(ax, calendar)
-        ax.tick_params(axis="x", labelsize=11)
+        ax.tick_params(axis="x", labelsize=16)
 
         vis_pct = (
             100.0 * (total_mins - non_vis_total) / total_mins
@@ -2301,14 +2301,14 @@ class ScheduleVisualizer:
         duty_pct = 100.0 * total_mins / span_mins if span_mins > 0 else 0.0
         ax.set_title(
             f"{title}\n"
-            f"({non_vis_total} non-visible min / "
-            f"{total_mins} total — {vis_pct:.1f}% visible)\n"
-            f"({total_mins:.0f} observed mins / {span_mins:.0f} total mins "
-            f"— {duty_pct:.1f}% duty cycle)",
-            fontsize=15,
+            f"{non_vis_total} of {total_mins} min not visible "
+            f"({vis_pct:.1f}% visible)\n"
+            f"{total_mins:.0f} of {span_mins:.0f} min observed "
+            f"({duty_pct:.1f}% duty cycle)",
+            fontsize=20,
             pad=10,
         )
-        ax.set_xlabel("Time (UTC)", fontsize=13)
+        ax.set_xlabel("Time (UTC)", fontsize=18)
         ax.grid(True, axis="x", alpha=0.3)
 
         if plot_rolls:
@@ -2326,8 +2326,8 @@ class ScheduleVisualizer:
             colorbar = fig.colorbar(
                 mappable, cax=colorbar_axes, ticks=[-180, -90, 0, 90, 180]
             )
-            colorbar.set_label("Prescribed roll (deg)", fontsize=13)
-            colorbar.ax.tick_params(labelsize=11)
+            colorbar.set_label("Prescribed roll (deg)", fontsize=18)
+            colorbar.ax.tick_params(labelsize=16)
 
         # Legend
         legend_items = [
@@ -2340,9 +2340,9 @@ class ScheduleVisualizer:
         ax.legend(
             handles=legend_items,
             loc="upper right",
-            fontsize=11,
+            fontsize=16,
             title="upper half: priority\nlower half: roll" if plot_rolls else None,
-            title_fontsize=11,
+            title_fontsize=16,
         )
 
         # Reserve a margin at the top: the title runs to three lines and
