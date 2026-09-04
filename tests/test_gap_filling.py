@@ -169,8 +169,6 @@ class TestTrimNonVisibleTails:
     def _make_processor(self, visibility_cls):
         proc = ScheduleProcessor.__new__(ScheduleProcessor)
         proc.min_sequence_duration = TimeDelta(8 * 60 * u.s)
-        proc._roll_sweep_enabled = False
-        proc._computed_target_rolls = {}
         proc.visibility = visibility_cls
         proc.earthlimb_gap_tolerance = 0
         proc.st_gap_tolerance = 0
@@ -329,8 +327,6 @@ class TestTrimToLongestVisibleBlock:
     def _make_processor(self, visibility_cls):
         proc = ScheduleProcessor.__new__(ScheduleProcessor)
         proc.min_sequence_duration = TimeDelta(8 * 60 * u.s)
-        proc._roll_sweep_enabled = False
-        proc._computed_target_rolls = {}
         proc.visibility = visibility_cls
         proc.earthlimb_gap_tolerance = 0
         proc.st_gap_tolerance = 0
@@ -728,8 +724,6 @@ class TestToleranceAtHeadsAndTails:
     def _make_processor(self, visibility_cls):
         proc = ScheduleProcessor.__new__(ScheduleProcessor)
         proc.min_sequence_duration = TimeDelta(8 * 60 * u.s)
-        proc._roll_sweep_enabled = False
-        proc._computed_target_rolls = {}
         proc.visibility = visibility_cls
         proc.earthlimb_gap_tolerance = 0
         proc.st_gap_tolerance = 0
@@ -864,8 +858,6 @@ class TestSTStartBuffer:
         proc = ScheduleProcessor.__new__(ScheduleProcessor)
         proc.visibility = visibility
         proc.min_sequence_duration = TimeDelta(8 * 60 * u.s)
-        proc._roll_sweep_enabled = False
-        proc._computed_target_rolls = {}
         proc.st_gap_tolerance_start_buffer = buffer_minutes
         # These tests are about the star-tracker buffer specifically, so
         # the Earth-limb one is left off.
@@ -996,9 +988,8 @@ class TestSTStartBuffer:
             roll_masks={137: np.zeros(60, dtype=bool)},
         )
         proc = self._make_processor(vis)
-        proc._roll_sweep_enabled = True
-        proc._computed_target_rolls = {"v1": {"T": 137.0}}
         seq = _make_seq("s1", "T", start_min=0, duration_min=40)
+        seq.roll = 137.0
         cal = _make_calendar([seq])
 
         proc._enforce_start_buffers(cal)
@@ -1049,8 +1040,6 @@ class TestEarthlimbStartBuffer:
         proc = ScheduleProcessor.__new__(ScheduleProcessor)
         proc.visibility = visibility
         proc.min_sequence_duration = TimeDelta(8 * 60 * u.s)
-        proc._roll_sweep_enabled = False
-        proc._computed_target_rolls = {}
         proc.st_gap_tolerance_start_buffer = 0
         proc.earthlimb_gap_tolerance_start_buffer = buffer_minutes
         return proc

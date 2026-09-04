@@ -8,9 +8,10 @@ import numpy as np
 import shortschedule
 from shortschedule.parser import parse_science_calendar
 from shortschedule.scheduler import ScheduleProcessor
+from tests.doubles import BestRollFromVisibility
 
 
-class DummyVisibilityAllTrue:
+class DummyVisibilityAllTrue(BestRollFromVisibility):
     def __init__(self, l1, l2, **kwargs):
         pass
 
