@@ -173,6 +173,10 @@ class ScheduleProcessor:
         max_movement_minutes: int = 45,
         grow_by_priority: bool = True,
         drop_priority0: bool = False,
+        add_pri12_in_freetime: bool = False,
+        pri12_freetime_fill_earthlimb_min: Optional[float] = 69,
+        pri12_freetime_min_duration: int = 12,
+        pri12_freetime_fill_min_num: int = 3,
         earthlimb_gap_tolerance: int = 0,
         earthlimb_gap_tolerance_start_buffer: int = 7.5,
         st_gap_tolerance: int = 0,
@@ -314,6 +318,22 @@ class ScheduleProcessor:
             warning. Merging also drops priority 0s that are all that
             separates two otherwise mergeable priority-1/2 observations
             (default False).
+        add_pri12_in_freetime : bool, optional
+            After every timing pass and the merge, add priority-1
+            observations of the window's priority-1/2 targets to idle time
+            where they are visible, so data volumes and the header include
+            them (default False). See ``_fill_free_time`` for the rules.
+        pri12_freetime_fill_earthlimb_min : float, optional
+            Flat boresight Earth-limb keepout (deg) the added observations
+            are judged under, built like ``priority_0_earthlimb_min``: no
+            day/night split or dynamic wedge, every other keepout unchanged
+            (default 69). ``None`` judges them under the nominal keepouts.
+        pri12_freetime_min_duration : int, optional
+            Shortest observation added to idle time, in minutes (default
+            12). Never less than ``min_sequence_duration``.
+        pri12_freetime_fill_min_num : int, optional
+            Fewest observations added to one visit; a visit that would get
+            fewer gets none (default 3).
         earthlimb_gap_tolerance : int, optional
             Maximum number of contiguous minutes of earth-limb
             visibility violations to tolerate within a sequence
@@ -377,23 +397,46 @@ class ScheduleProcessor:
         _kw = {k: v for k, v in _kw.items() if v is not None}
         self.visibility = Visibility(tle_line1, tle_line2, **_kw)
 
+        def flat_earthlimb_model(earthlimb_min):
+            # The nominal keepouts with a flat Earth limb in place of the
+            # day/night or dynamic one. Explicit None, not a pop: dropping
+            # the key lets Visibility fall back to its own day/night
+            # defaults, which since v1.3.0 are real angles rather than None.
+            # Those would then override the flat angle the caller asked for.
+            flat_kw = dict(
+                _kw,
+                earthlimb_day_min=None,
+                earthlimb_night_min=None,
+                use_dynamic_earthlimb=False,
+                earthlimb_min=self._to_deg(earthlimb_min),
+            )
+            return Visibility(tle_line1, tle_line2, **flat_kw)
+
         # Priority-0 observations may be held further off the Earth limb so
         # the spacecraft can dissipate more heat.
         # Every other keepout, the star trackers included, is unchanged
         self.priority_0_earthlimb_min = priority_0_earthlimb_min
         self.priority_0_visibility = None
         if priority_0_earthlimb_min is not None:
-            _pri0_kw = dict(_kw)
-            # Explicit None, not a pop: dropping the key lets Visibility
-            # fall back to its own day/night defaults, which since v1.3.0
-            # are real angles rather than None. Those would then override
-            # the flat priority_0_earthlimb_min the caller asked for.
-            _pri0_kw["earthlimb_day_min"] = None
-            _pri0_kw["earthlimb_night_min"] = None
-            _pri0_kw["use_dynamic_earthlimb"] = False
-            _pri0_kw["earthlimb_min"] = self._to_deg(priority_0_earthlimb_min)
-            self.priority_0_visibility = Visibility(
-                tle_line1, tle_line2, **_pri0_kw
+            self.priority_0_visibility = flat_earthlimb_model(
+                priority_0_earthlimb_min
+            )
+
+        # Observations added to idle time get their own flat limb, built
+        # the same way. None judges them under the nominal model.
+        self.add_pri12_in_freetime = add_pri12_in_freetime
+        self.pri12_freetime_fill_earthlimb_min = (
+            pri12_freetime_fill_earthlimb_min
+        )
+        self.pri12_freetime_min_duration = pri12_freetime_min_duration
+        self.pri12_freetime_fill_min_num = pri12_freetime_fill_min_num
+        self.pri12_freetime_visibility = None
+        if (
+            add_pri12_in_freetime
+            and pri12_freetime_fill_earthlimb_min is not None
+        ):
+            self.pri12_freetime_visibility = flat_earthlimb_model(
+                pri12_freetime_fill_earthlimb_min
             )
 
         self.min_sequence_duration = TimeDelta(8 * 60 * u.s)
@@ -597,6 +640,14 @@ class ScheduleProcessor:
             processed_calendar = self._update_payload_parameters(
                 processed_calendar
             )
+
+        # Optionally add observations of the window's priority-1/2 targets
+        # to the idle time left by everything above. Runs after every timing
+        # pass and the merge, so it sees the final schedule, and before
+        # renumbering and the summaries, so the header, the validators and
+        # any diagnostics (data volumes included) count what it adds.
+        if getattr(self, "add_pri12_in_freetime", False):
+            processed_calendar = self._fill_free_time(processed_calendar)
 
         # Renumber visit and observation IDs sequentially. This runs last,
         # after any merges/time changes that may have dropped IDs, so the
@@ -959,10 +1010,13 @@ class ScheduleProcessor:
         first: ObservationSequence,
         second: ObservationSequence,
         occupied: Optional[List[Tuple[Time, Time]]] = None,
+        visibility: Any = None,
     ) -> bool:
         """Return True if ``second`` can be merged into ``first``.
 
         See :meth:`_merge_similar_observations` for the merge criteria.
+        ``visibility`` judges any gap between them under that model rather
+        than the one ``first``'s priority flies.
         """
         # Same target (case-insensitive, whitespace-insensitive).
         if (first.target or "").strip().lower() != (
@@ -1005,12 +1059,13 @@ class ScheduleProcessor:
         ):
             return False
 
-        return self._gap_is_bridgeable(first, second)
+        return self._gap_is_bridgeable(first, second, visibility=visibility)
 
     def _gap_is_bridgeable(
         self,
         first: ObservationSequence,
         second: ObservationSequence,
+        visibility: Any = None,
     ) -> bool:
         """Whether the gap between two observations is short enough to absorb.
 
@@ -1034,7 +1089,7 @@ class ScheduleProcessor:
         times = first.stop_time + np.arange(minutes) * u.min
         roll = first.roll
 
-        model = self._visibility_for_priority(first.priority)
+        model = visibility or self._visibility_for_priority(first.priority)
         visible = np.atleast_1d(
             np.asarray(
                 model.get_visibility(
@@ -1056,6 +1111,292 @@ class ScheduleProcessor:
             roll=roll,
             visibility=model,
         )
+
+    def _fill_free_time(self, calendar: ScienceCalendar) -> ScienceCalendar:
+        """Add observations of the window's priority-1/2 targets to idle time.
+
+        Runs after every timing pass and the merge when
+        ``add_pri12_in_freetime`` is on. Every idle stretch of at least
+        ``pri12_freetime_min_duration`` is offered to each target with a
+        priority-1 or 2 observation in the window:
+
+        - Visit: a stretch inside a visit's span joins that visit; one
+          between two visits joins the one already holding the target,
+          otherwise the one before it.
+        - Roll: one roll per target per visit. A target already in the
+          visit flies that visit's roll; a target new to it flies the roll
+          of its own visit nearest in time, and keeps it in that visit.
+        - Visibility: judged under ``pri12_freetime_visibility`` (the flat
+          ``pri12_freetime_fill_earthlimb_min`` limb, or the nominal model
+          when that is None) with the same start buffers and gap tolerances
+          as any observation: it starts clean, steps over tolerable dips
+          and ends on a visible minute.
+        - Choice: the target observed most recently before the stretch (by
+          its scheduled observations, not earlier additions), then the most
+          usable minutes. What is left on either side is offered again.
+
+        A visit that would receive fewer than ``pri12_freetime_fill_min_num``
+        observations receives none. Each one added is priority 1 and copies
+        its target's priority-1 observation (its priority-2 one when it has
+        none), is merged with a same-target, same-priority neighbor in its
+        visit where the merge rules allow under the same model, and has its
+        integration counts computed for its length. Assumes observation
+        boundaries fall on whole minutes from the window start, which every
+        pass before this one keeps.
+        """
+        model = self.pri12_freetime_visibility or self.visibility
+        min_minutes = max(
+            int(self.pri12_freetime_min_duration),
+            int(np.rint(self.min_sequence_duration.sec / 60.0)),
+        )
+        window_start = self.window_start
+        n_minutes = int(np.rint((self.window_end - window_start).sec / 60.0))
+        grid_times = window_start + np.arange(n_minutes) * u.min
+
+        # Every observation as (start, stop, visit, sequence) in minutes
+        # from the window start, in time order.
+        scheduled = sorted(
+            (
+                (
+                    int(np.rint((seq.start_time - window_start).sec / 60.0)),
+                    int(np.rint((seq.stop_time - window_start).sec / 60.0)),
+                    visit.id,
+                    seq,
+                )
+                for visit in calendar.visits
+                for seq in visit.sequences
+            ),
+            key=lambda span: span[:2],
+        )
+        slots, cursor = [], 0
+        for start, stop, _, _ in scheduled:
+            if min(start, n_minutes) - cursor >= min_minutes:
+                slots.append((cursor, min(start, n_minutes)))
+            cursor = max(cursor, stop)
+        if n_minutes - cursor >= min_minutes:
+            slots.append((cursor, n_minutes))
+
+        # The roll each target flies in each visit, and per candidate: its
+        # pointing, the observation an addition copies, its visits' spans
+        # and rolls, and when its observations end (for recency).
+        visit_rolls: Dict[Any, Dict[str, Any]] = {
+            visit.id: {} for visit in calendar.visits
+        }
+        candidates: Dict[str, Dict[str, Any]] = {}
+        for start, stop, visit_id, seq in scheduled:
+            visit_rolls[visit_id].setdefault(seq.target, seq.roll)
+            if int(seq.priority or 0) == 0:
+                continue
+            entry = candidates.setdefault(
+                seq.target,
+                {
+                    "coord": SkyCoord(
+                        seq.ra, seq.dec, frame="icrs", unit="deg"
+                    ),
+                    "template": seq,
+                    "visits": {},
+                    "stops": [],
+                },
+            )
+            if int(seq.priority) == 1 and int(entry["template"].priority) != 1:
+                entry["template"] = seq
+            entry["stops"].append(stop)
+            span = entry["visits"].setdefault(
+                visit_id, [start, stop, seq.roll]
+            )
+            span[0], span[1] = min(span[0], start), max(span[1], stop)
+
+        # Per (target, roll): visibility and start-buffer checks over the
+        # whole window, computed the first time a stretch asks for them.
+        grids: Dict[Tuple[str, Any], Tuple[np.ndarray, List[Any]]] = {}
+        placed: List[Dict[str, Any]] = []
+        queue = list(slots)
+        while queue:
+            slot_start, slot_stop = queue.pop()
+            previous_visit = max(
+                (
+                    (stop, vid)
+                    for _, stop, vid, _ in scheduled
+                    if stop <= slot_start
+                ),
+                default=(None, None),
+            )[1]
+            next_visit = min(
+                (
+                    (start, vid)
+                    for start, _, vid, _ in scheduled
+                    if start >= slot_stop
+                ),
+                default=(None, None),
+            )[1]
+            best = None
+            for target, entry in candidates.items():
+                visit_id = previous_visit
+                if previous_visit is None or (
+                    next_visit is not None
+                    and target in visit_rolls[next_visit]
+                    and target not in visit_rolls[previous_visit]
+                ):
+                    visit_id = next_visit
+                if visit_id is None:
+                    continue
+                if target in visit_rolls[visit_id]:
+                    roll = visit_rolls[visit_id][target]
+                else:
+                    middle = (slot_start + slot_stop) / 2
+                    roll = min(
+                        entry["visits"].values(),
+                        key=lambda span: abs((span[0] + span[1]) / 2 - middle),
+                    )[2]
+                if (target, roll) not in grids:
+                    probe = entry["template"].copy()
+                    probe.roll = roll
+                    visible = model.get_visibility(
+                        entry["coord"],
+                        grid_times,
+                        **({} if roll is None else {"roll": roll * u.deg}),
+                    )["visible"]
+                    grids[(target, roll)] = (
+                        np.atleast_1d(np.asarray(visible, dtype=bool)),
+                        self._start_buffer_requirements(
+                            probe, grid_times, entry["coord"], visibility=model
+                        ),
+                    )
+                visible, requirements = grids[(target, roll)]
+
+                # Longest usable observation in the stretch, trying the
+                # first minute of each visible run as its opening.
+                vis = visible[slot_start:slot_stop]
+                offer = None
+                for offset in np.flatnonzero(vis & ~np.r_[False, vis[:-1]]):
+                    clean = self._first_clean_start(
+                        [
+                            (name, buffer, ok[slot_start + offset : slot_stop])
+                            for name, buffer, ok in requirements
+                        ],
+                        len(vis) - offset,
+                    )
+                    if clean is None or not vis[offset + clean]:
+                        continue
+                    opening = offset + clean
+                    minutes = self._growable_minutes(
+                        vis[opening:],
+                        grid_times[slot_start + opening : slot_stop],
+                        entry["coord"],
+                        roll,
+                        visibility=model,
+                    )
+                    if minutes >= min_minutes and (
+                        offer is None or minutes > offer[1]
+                    ):
+                        offer = (slot_start + opening, minutes)
+                if offer is None:
+                    continue
+                ended = [stop for stop in entry["stops"] if stop <= slot_start]
+                age = slot_start - max(ended) if ended else np.inf
+                if best is None or (-age, offer[1]) > best[0]:
+                    best = ((-age, offer[1]), target, visit_id, roll, *offer)
+            if best is None:
+                continue
+            _, target, visit_id, roll, start, minutes = best
+            visit_rolls[visit_id].setdefault(target, roll)
+            placed.append(
+                {
+                    "target": target,
+                    "visit": visit_id,
+                    "roll": roll,
+                    "start": start,
+                    "minutes": minutes,
+                }
+            )
+            for piece_start, piece_stop in (
+                (slot_start, start),
+                (start + minutes, slot_stop),
+            ):
+                if piece_stop - piece_start >= min_minutes:
+                    queue.append((piece_start, piece_stop))
+
+        # A visit too few observations would join gets none of them.
+        per_visit: Dict[Any, int] = defaultdict(int)
+        for fill in placed:
+            per_visit[fill["visit"]] += 1
+        minimum_count = int(self.pri12_freetime_fill_min_num or 0)
+        for visit_id, count in per_visit.items():
+            if count < minimum_count:
+                self._print(
+                    f"Visit {visit_id}: {count} observation(s) fit its idle "
+                    "time, fewer than pri12_freetime_fill_min_num="
+                    f"{minimum_count}; none added."
+                )
+        placed = [
+            fill
+            for fill in placed
+            if per_visit[fill["visit"]] >= minimum_count
+        ]
+
+        visits = {visit.id: visit for visit in calendar.visits}
+        added = set()  # id() of every added observation
+        placed.sort(key=lambda fill: fill["start"])
+        for number, fill in enumerate(placed, start=1):
+            seq = candidates[fill["target"]]["template"].copy()
+            seq.id = f"F{number:03d}"
+            seq.priority = 1
+            seq.roll = fill["roll"]
+            seq.start_time = window_start + fill["start"] * u.min
+            seq.stop_time = seq.start_time + fill["minutes"] * u.min
+            visits[fill["visit"]].sequences.append(seq)
+            added.add(id(seq))
+            self._print(
+                f"{self._seq_prefix(fill['visit'], seq)} | FREE TIME: added "
+                f"{fill['minutes']} min of priority-1 {seq.target} at roll "
+                f"{fill['roll']} deg to idle time."
+            )
+
+        # Join an addition to a same-target, same-priority neighbor in its
+        # visit where the merge rules allow, any gap judged under the same
+        # model. Mixed priorities never merge: a merge keeps the first one's.
+        occupied = [
+            (seq.start_time, seq.stop_time)
+            for _, seq in self._ordered_sequences(calendar)
+        ]
+        merged = 0
+        for visit_id in {fill["visit"] for fill in placed}:
+            visit = visits[visit_id]
+            kept: List[ObservationSequence] = []
+            for seq in sorted(visit.sequences, key=lambda s: s.start_time):
+                previous = kept[-1] if kept else None
+                if (
+                    previous is not None
+                    and (id(previous) in added or id(seq) in added)
+                    and int(previous.priority or 0) == int(seq.priority or 0)
+                    and self._can_merge(
+                        previous, seq, occupied, visibility=model
+                    )
+                ):
+                    self._print(
+                        f"{self._seq_prefix(visit_id, previous)} | MERGE: "
+                        f"absorbing sequence {seq.id}; stop "
+                        f"{previous.stop_time_str} -> {seq.stop_time_str}"
+                    )
+                    previous.stop_time = seq.stop_time
+                    added.add(id(previous))
+                    merged += 1
+                else:
+                    kept.append(seq)
+            visit.sequences = kept
+
+        calendar = self._update_payload_parameters(calendar)
+
+        added_minutes = sum(fill["minutes"] for fill in placed)
+        summary = self.gap_report["processing_summary"]
+        summary["free_time_observations_added"] = len(placed)
+        summary["free_time_minutes_added"] = added_minutes
+        self._print(
+            f"Added {len(placed)} priority-1 observation(s), {added_minutes} "
+            f"min, to idle time in {len({f['visit'] for f in placed})} "
+            f"visit(s); {merged} merged into a neighbor."
+        )
+        return calendar
 
     def _process_all_sequences(
         self, calendar: ScienceCalendar, verbose: bool = False
@@ -2321,13 +2662,15 @@ class ScheduleProcessor:
         seq: ObservationSequence,
         times: Any,
         target_coord: SkyCoord,
+        visibility: Any = None,
     ) -> List[Tuple[str, int, np.ndarray]]:
         """The per-minute checks ``_enforce_start_buffers`` holds ``seq`` to.
 
         Each is ``(reason, buffer_minutes, ok_per_minute)`` over ``times``,
-        judged under the model the sequence's priority flies at its roll.
-        Empty when no buffer is configured or a check cannot be asked of
-        the model, in which case the opening is not judged at all.
+        judged at its roll under ``visibility``, or by default the model
+        the sequence's priority flies. Empty when no buffer is configured
+        or a check cannot be asked of the model, in which case the opening
+        is not judged at all.
         """
         st_buffer = int(getattr(self, "st_gap_tolerance_start_buffer", 0) or 0)
         earthlimb_buffer = int(
@@ -2335,7 +2678,7 @@ class ScheduleProcessor:
         )
         if not getattr(self.visibility, "_st_constraint_active", False):
             st_buffer = 0
-        model = self._visibility_for_priority(seq.priority)
+        model = visibility or self._visibility_for_priority(seq.priority)
         roll = None if seq.roll is None else seq.roll * u.deg
 
         requirements = []
@@ -4148,7 +4491,25 @@ class ScheduleProcessor:
             "Drop_Priority0": str(getattr(self, "drop_priority0", False)),
             "Roll_Step_Deg": f"{float(self.roll_step):g}",
             "Min_Power_Frac": f"{float(self.min_power_frac):g}",
+            "Add_Pri12_In_Freetime": str(
+                getattr(self, "add_pri12_in_freetime", False)
+            ),
         }
+        # The free-time settings only mean something when the pass ran.
+        if getattr(self, "add_pri12_in_freetime", False):
+            settings.update(
+                {
+                    "Pri12_Freetime_Fill_Earthlimb_Min_Deg": angle(
+                        self.pri12_freetime_visibility, "earthlimb_min"
+                    ),
+                    "Pri12_Freetime_Min_Duration_Min": str(
+                        self.pri12_freetime_min_duration
+                    ),
+                    "Pri12_Freetime_Fill_Min_Num": str(
+                        self.pri12_freetime_fill_min_num
+                    ),
+                }
+            )
         # A keepout with no value is left out rather than written empty:
         # Priority_0_Earthlimb_Min_Deg absent means it was not in use.
         return {k: v for k, v in settings.items() if v is not None}
@@ -4350,6 +4711,8 @@ class ScheduleProcessor:
                 "minutes_grown_at_stops": 0,
                 "minutes_taken_from_lower_priority": 0,
                 "priority_0_dropped": 0,
+                "free_time_observations_added": 0,
+                "free_time_minutes_added": 0,
                 "boundaries_clamped": 0,
                 "overlaps_repaired": 0,
                 "original_gap_time_minutes": 0,

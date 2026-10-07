@@ -85,6 +85,10 @@ scheduler = ScheduleProcessor(
     min_power_frac=0.68,  # min acceptable orbit-average power fraction
     grow_by_priority=True,  # higher priorities grow first and may take time from lower-priority neighbors
     drop_priority0=False,  # let a priority 1/2 grow past (and drop) a priority 0, or merge across priority-0 filler
+    add_pri12_in_freetime=False,  # add priority-1 observations of this window's priority-1/2 targets to idle time
+    pri12_freetime_fill_earthlimb_min=69,  # flat Earth-limb keepout (deg) for those additions; None = nominal keepouts
+    pri12_freetime_min_duration=12,  # shortest addition (min)
+    pri12_freetime_fill_min_num=3,  # a visit that would get fewer additions than this gets none
     convert_single_roi_to_predefined=True,  # single auto-detect ROI -> predefined ROI at target RA/Dec
     fix_bad_data=True,  # replace invalid name symbols (e.g. "+") and report NaN-like values
     # ----------------------------------------------------------------------
