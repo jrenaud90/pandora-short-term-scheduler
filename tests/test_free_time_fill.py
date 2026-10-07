@@ -273,3 +273,131 @@ class TestConfiguration:
             "Pri12_Freetime_Fill_Earthlimb_Min_Deg"
             not in scheduler._settings_for_header()
         )
+
+
+# ================================================================
+# pri12_freetime_override_pr0
+# ================================================================
+
+
+def _override_proc(fill_visible_minutes, window_minutes):
+    """Additions may cover priority-0 time; they are visible to the fill
+    model only where ``fill_visible_minutes`` says."""
+    fill_pattern = np.zeros(window_minutes, dtype=bool)
+    fill_pattern[fill_visible_minutes] = True
+    proc = _proc(window_minutes=window_minutes)
+    proc.pri12_freetime_visibility = _PatternVis(fill_pattern)
+    proc.pri12_freetime_override_pr0 = True
+    return proc
+
+
+def _a_then_p(p_start, p_duration):
+    return ScienceCalendar(
+        metadata={},
+        visits=[
+            Visit(
+                id="v1",
+                sequences=[
+                    _seq("s1", "A", 0, 10),
+                    _seq("s2", "P", p_start, p_duration, priority=0),
+                ],
+            )
+        ],
+    )
+
+
+def test_override_off_leaves_priority_0_time_alone():
+    proc = _override_proc(slice(0, 40), 40)
+    proc.pri12_freetime_override_pr0 = False
+    calendar = _a_then_p(10, 30)
+
+    proc._fill_free_time(calendar)
+
+    assert _spans(calendar.visits[0]) == [("A", 1, 0, 10), ("P", 0, 10, 40)]
+
+
+def test_override_replaces_a_priority_0_it_covers(capsys):
+    proc = _override_proc(slice(0, 40), 40)
+    calendar = _a_then_p(10, 30)
+
+    proc._fill_free_time(calendar)
+
+    assert _spans(calendar.visits[0]) == [("A", 1, 0, 40)]
+    summary = proc.gap_report["processing_summary"]
+    assert summary["priority_0_dropped"] == 1
+    assert summary["free_time_minutes_from_priority_0"] == 30
+    assert "WARNING" in capsys.readouterr().out
+
+
+def test_override_eats_one_end_and_keeps_the_rest():
+    proc = _override_proc(slice(0, 30), 60)
+    calendar = _a_then_p(10, 50)
+
+    proc._fill_free_time(calendar)
+
+    assert _spans(calendar.visits[0]) == [("A", 1, 0, 30), ("P", 0, 30, 60)]
+
+
+def test_override_in_the_middle_keeps_the_longer_side():
+    proc = _override_proc(slice(35, 50), 70)
+    calendar = _a_then_p(10, 60)
+
+    proc._fill_free_time(calendar)
+
+    assert _spans(calendar.visits[0]) == [
+        ("A", 1, 0, 10),
+        ("P", 0, 10, 35),
+        ("A", 1, 35, 50),
+    ]
+
+
+def test_override_drops_a_remnant_below_the_minimum():
+    proc = _override_proc(slice(0, 24), 30)
+    calendar = _a_then_p(10, 20)
+
+    proc._fill_free_time(calendar)
+
+    # 6 min would be left of P, under the 8 min minimum.
+    assert _spans(calendar.visits[0]) == [("A", 1, 0, 24)]
+
+
+def test_override_drops_a_remnant_past_the_movement_limit():
+    proc = _override_proc(slice(0, 30), 60)
+    proc.max_movement_minutes = 10
+    proc._original_timing = {("v1", "s2"): (T0 + 10 * u.min, T0 + 60 * u.min)}
+    calendar = _a_then_p(10, 50)
+
+    proc._fill_free_time(calendar)
+
+    # Keeping 30-60 would move P's start 20 min from its long-term time.
+    assert _spans(calendar.visits[0]) == [("A", 1, 0, 30)]
+
+
+def test_override_remnant_opens_clean():
+    """P's new start is walked past a dark minute inside its start buffer,
+    judged under P's own model."""
+    nominal = np.ones(60, dtype=bool)
+    nominal[31] = False
+    proc = _override_proc(slice(0, 30), 60)
+    proc.visibility = _PatternVis(nominal)
+    proc.earthlimb_gap_tolerance_start_buffer = 5
+    calendar = _a_then_p(10, 50)
+
+    proc._fill_free_time(calendar)
+
+    assert _spans(calendar.visits[0]) == [("A", 1, 0, 30), ("P", 0, 32, 60)]
+
+
+def test_override_is_written_to_the_header():
+    scheduler = ScheduleProcessor(
+        TLE1,
+        TLE2,
+        add_pri12_in_freetime=True,
+        pri12_freetime_override_pr0=True,
+        **NOMINAL,
+    )
+
+    assert (
+        scheduler._settings_for_header()["Pri12_Freetime_Override_Pr0"]
+        == "True"
+    )

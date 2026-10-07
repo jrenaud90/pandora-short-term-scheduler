@@ -177,6 +177,7 @@ class ScheduleProcessor:
         pri12_freetime_fill_earthlimb_min: Optional[float] = 69,
         pri12_freetime_min_duration: int = 12,
         pri12_freetime_fill_min_num: int = 3,
+        pri12_freetime_override_pr0: bool = False,
         earthlimb_gap_tolerance: int = 0,
         earthlimb_gap_tolerance_start_buffer: int = 7.5,
         st_gap_tolerance: int = 0,
@@ -334,6 +335,13 @@ class ScheduleProcessor:
         pri12_freetime_fill_min_num : int, optional
             Fewest observations added to one visit; a visit that would get
             fewer gets none (default 3).
+        pri12_freetime_override_pr0 : bool, optional
+            Let those additions use priority-0 time as well as idle time
+            (default False). A priority 0 they overlap keeps its longest
+            remaining piece if that can still fly (``min_sequence_duration``
+            once its start buffers are clean, boundaries within
+            ``max_movement_minutes``); otherwise it is dropped with a
+            warning.
         earthlimb_gap_tolerance : int, optional
             Maximum number of contiguous minutes of earth-limb
             visibility violations to tolerate within a sequence
@@ -430,6 +438,7 @@ class ScheduleProcessor:
         )
         self.pri12_freetime_min_duration = pri12_freetime_min_duration
         self.pri12_freetime_fill_min_num = pri12_freetime_fill_min_num
+        self.pri12_freetime_override_pr0 = pri12_freetime_override_pr0
         self.pri12_freetime_visibility = None
         if (
             add_pri12_in_freetime
@@ -1135,6 +1144,13 @@ class ScheduleProcessor:
           its scheduled observations, not earlier additions), then the most
           usable minutes. What is left on either side is offered again.
 
+        With ``pri12_freetime_override_pr0`` only priority-1/2 observations
+        bound a stretch, so additions may also cover priority-0 time; a
+        priority 0 they overlap keeps its longest remaining piece if that
+        can still fly (minimum duration once its start buffers are clean,
+        boundaries within ``max_movement_minutes`` of its long-term times)
+        and is otherwise dropped with a warning.
+
         A visit that would receive fewer than ``pri12_freetime_fill_min_num``
         observations receives none. Each one added is priority 1 and copies
         its target's priority-1 observation (its priority-2 one when it has
@@ -1168,8 +1184,12 @@ class ScheduleProcessor:
             ),
             key=lambda span: span[:2],
         )
+        # Priority-0 time counts as free when the additions may override it.
+        override = bool(getattr(self, "pri12_freetime_override_pr0", False))
         slots, cursor = [], 0
-        for start, stop, _, _ in scheduled:
+        for start, stop, _, seq in scheduled:
+            if override and int(seq.priority or 0) == 0:
+                continue
             if min(start, n_minutes) - cursor >= min_minutes:
                 slots.append((cursor, min(start, n_minutes)))
             cursor = max(cursor, stop)
@@ -1352,6 +1372,115 @@ class ScheduleProcessor:
                 f"{fill['roll']} deg to idle time."
             )
 
+        # A priority 0 the additions overlap keeps its longest remaining
+        # piece if that can still fly: the minimum duration once its start
+        # buffers are clean (under its own model and roll), and both
+        # boundaries within the movement limit of its long-term times.
+        # Otherwise it is dropped.
+        taken_from_priority_0 = trimmed = dropped = 0
+        if override and placed:
+            limit = getattr(self, "max_movement_minutes", 0) or 0
+            original_timing = getattr(self, "_original_timing", {})
+            min_sequence_minutes = int(
+                np.rint(self.min_sequence_duration.sec / 60.0)
+            )
+            for start, stop, visit_id, seq in scheduled:
+                if int(seq.priority or 0) != 0 or stop <= start:
+                    continue
+                free = np.ones(stop - start, dtype=bool)
+                for fill in placed:
+                    lo = max(fill["start"], start)
+                    hi = min(fill["start"] + fill["minutes"], stop)
+                    if lo < hi:
+                        free[lo - start : hi - start] = False
+                if free.all():
+                    continue
+                taken_from_priority_0 += int((~free).sum())
+
+                # Longest piece left; the first of equal ones.
+                keep_start = keep_stop = start
+                index = 0
+                while index < len(free):
+                    end = index
+                    while end < len(free) and free[end]:
+                        end += 1
+                    if end - index > keep_stop - keep_start:
+                        keep_start, keep_stop = start + index, start + end
+                    index = end + 1
+                reason = None
+                if keep_stop == keep_start:
+                    reason = "the additions cover all of it"
+                elif keep_start != start:
+                    n_keep = keep_stop - keep_start
+                    clean = self._first_clean_start(
+                        self._start_buffer_requirements(
+                            seq,
+                            window_start
+                            + (keep_start + np.arange(n_keep)) * u.min,
+                            SkyCoord(
+                                seq.ra, seq.dec, frame="icrs", unit="deg"
+                            ),
+                        ),
+                        n_keep,
+                    )
+                    if clean is None:
+                        reason = (
+                            "its start buffers never clear in what is left"
+                        )
+                    else:
+                        keep_start += clean
+                if (
+                    reason is None
+                    and keep_stop - keep_start < min_sequence_minutes
+                ):
+                    reason = (
+                        f"what is left is {keep_stop - keep_start} min, under "
+                        f"the {min_sequence_minutes} min minimum"
+                    )
+                original = original_timing.get((visit_id, seq.id))
+                if reason is None and limit and original is not None:
+                    # Long-term times in whole minutes from the window start.
+                    long_start, long_stop = (
+                        int(np.rint((time - window_start).sec / 60.0))
+                        for time in original
+                    )
+                    moved = max(
+                        abs(keep_start - long_start),
+                        abs(keep_stop - long_stop),
+                    )
+                    if moved > limit:
+                        reason = (
+                            f"keeping what is left would move it {moved} min "
+                            f"from its long-term time (limit {limit} min)"
+                        )
+                prefix = self._seq_prefix(visit_id, seq)
+                if reason is not None:
+                    visits[visit_id].sequences = [
+                        other
+                        for other in visits[visit_id].sequences
+                        if other is not seq
+                    ]
+                    dropped += 1
+                    self._print(
+                        f"WARNING: {prefix} | FREE TIME: dropped priority-0 "
+                        f"{seq.target} under priority-1 observations added "
+                        f"over it: {reason} (pri12_freetime_override_pr0)."
+                    )
+                    continue
+                seq.start_time = window_start + keep_start * u.min
+                seq.stop_time = window_start + keep_stop * u.min
+                trimmed += 1
+                self._print(
+                    f"{prefix} | FREE TIME: priority-0 {seq.target} trimmed "
+                    f"to {seq.start_time_str} - {seq.stop_time_str} for "
+                    "priority-1 observations added over it."
+                )
+            calendar.visits = [
+                visit for visit in calendar.visits if visit.sequences
+            ]
+            summary = self.gap_report["processing_summary"]
+            summary["priority_0_dropped"] += dropped
+
         # Join an addition to a same-target, same-priority neighbor in its
         # visit where the merge rules allow, any gap judged under the same
         # model. Mixed priorities never merge: a merge keeps the first one's.
@@ -1391,10 +1520,13 @@ class ScheduleProcessor:
         summary = self.gap_report["processing_summary"]
         summary["free_time_observations_added"] = len(placed)
         summary["free_time_minutes_added"] = added_minutes
+        summary["free_time_minutes_from_priority_0"] = taken_from_priority_0
         self._print(
             f"Added {len(placed)} priority-1 observation(s), {added_minutes} "
             f"min, to idle time in {len({f['visit'] for f in placed})} "
-            f"visit(s); {merged} merged into a neighbor."
+            f"visit(s); {merged} merged into a neighbor; "
+            f"{taken_from_priority_0} min taken from priority 0 "
+            f"({trimmed} trimmed, {dropped} dropped)."
         )
         return calendar
 
@@ -1431,6 +1563,9 @@ class ScheduleProcessor:
             for visit in working_calendar.visits
             for seq in visit.sequences
         }
+        # Kept for _fill_free_time, which runs after this pass returns and
+        # holds a priority 0 it trims to the same movement limit.
+        self._original_timing = original_timing
         # Why each boundary moved, filled in by the passes below and read
         # back by _log_timing_changes.
         self._timing_notes = {}
@@ -4508,6 +4643,9 @@ class ScheduleProcessor:
                     "Pri12_Freetime_Fill_Min_Num": str(
                         self.pri12_freetime_fill_min_num
                     ),
+                    "Pri12_Freetime_Override_Pr0": str(
+                        getattr(self, "pri12_freetime_override_pr0", False)
+                    ),
                 }
             )
         # A keepout with no value is left out rather than written empty:
@@ -4713,6 +4851,7 @@ class ScheduleProcessor:
                 "priority_0_dropped": 0,
                 "free_time_observations_added": 0,
                 "free_time_minutes_added": 0,
+                "free_time_minutes_from_priority_0": 0,
                 "boundaries_clamped": 0,
                 "overlaps_repaired": 0,
                 "original_gap_time_minutes": 0,

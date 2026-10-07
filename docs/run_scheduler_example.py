@@ -89,6 +89,7 @@ scheduler = ScheduleProcessor(
     pri12_freetime_fill_earthlimb_min=69,  # flat Earth-limb keepout (deg) for those additions; None = nominal keepouts
     pri12_freetime_min_duration=12,  # shortest addition (min)
     pri12_freetime_fill_min_num=3,  # a visit that would get fewer additions than this gets none
+    pri12_freetime_override_pr0=False,  # let those additions take priority-0 time too (trimming or dropping it)
     convert_single_roi_to_predefined=True,  # single auto-detect ROI -> predefined ROI at target RA/Dec
     fix_bad_data=True,  # replace invalid name symbols (e.g. "+") and report NaN-like values
     # ----------------------------------------------------------------------
