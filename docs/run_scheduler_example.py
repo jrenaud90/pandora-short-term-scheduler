@@ -28,7 +28,7 @@ from shortschedule.visualizer import ScheduleVisualizer
 # ---------------------------------------------------------------------------
 # Inputs — UPDATE ME between runs
 # ---------------------------------------------------------------------------
-xml_file_path = Path("Path", "To", "Long-term", "Calendar.xml")
+xml_file_path = Path("G:\\","Other computers","Joe Desktop","Work Documents","Organizations","NASA - Pandora","Short Term Scheduler","WY45-2026-11-02","long-term","Pandora_science_calendar.xml")
 
 # Base name (without extension) used to label the output plots, e.g.
 # "Pandora_science_calendar".
@@ -36,8 +36,8 @@ calendar_name = xml_file_path.stem
 
 # Observing window: the short-term schedule is built starting at ``window_start``
 # and spanning ``window_duration_days``.
-window_start = Time("2026-08-17T00:00:00Z")
-window_duration_days = 7
+window_start = Time("2026-11-01T23:44:20Z")
+window_duration_days = 7.0015
 
 # Whether the visibility Gantt also paints the prescribed roll of each
 # observation on the lower half of its bar, with a colorbar.
@@ -85,6 +85,9 @@ scheduler = ScheduleProcessor(
     trace_contamination_tol=1e-3,  # max worst-row neighbor/target flux in the NIRDA extraction aperture
     nirda_roi_x=80,  # NIRDA ROI columns (across the dispersion) the trace check counts light in
     nirda_roi_y=256,  # NIRDA ROI rows (along the dispersion) the trace check counts light in
+    target_list_dir=Path("C:\\", "Gits", "PandoraTargetList_og"),  # PandoraTargetList checkout whose transit ephemerides hold priority-2 observations to their transits; None turns this off
+    transit_middle_frac=0.75,  # the middle fraction of each transit's duration (T14) that forms its core
+    transit_duration_constraint_min=15,  # visible minutes of the core a transit's priority-2 observations must keep; shrinks that break this are refused (0 turns it off)
     roll_step=1.0,  # roll search step size (deg)
     min_power_frac=0.68,  # min acceptable orbit-average power fraction
     grow_by_priority=True,  # higher priorities grow first and may take time from lower-priority neighbors
