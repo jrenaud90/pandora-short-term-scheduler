@@ -178,6 +178,10 @@ class ScheduleProcessor:
         st_gap_tolerance: int = 0,
         st_gap_tolerance_start_buffer: int = 7.5,
         use_dynamic_earthlimb: Optional[bool] = None,
+        use_trace_sweep: Optional[bool] = None,
+        trace_contamination_tol: Optional[float] = None,
+        nirda_roi_x: Optional[int] = None,
+        nirda_roi_y: Optional[int] = None,
     ) -> None:
         """
         Initialize the scheduler with TLE and parameters.
@@ -348,6 +352,23 @@ class ScheduleProcessor:
             ``pandoravisibility``, which, currently, defaults to
             switching the wedge on. Passing ``False`` selects the
             flat or day/night limb instead.
+        use_trace_sweep : bool, optional
+            If True, the roll search rejects rolls where neighbor stars'
+            NIRDA traces contaminate the target's spectrum by more than
+            ``trace_contamination_tol``, taking the best ranked roll that
+            passes. A target that some roll could see but no such roll
+            passes is dropped from that visit (logged as an error). Needs
+            the gaiaoffline database. ``None`` (default) defers to
+            ``pandoravisibility``, which currently switches it on.
+        trace_contamination_tol : float, optional
+            Largest acceptable trace contamination: the worst extraction
+            row's neighbor flux over the target's, within the roll
+            uncertainty. ``None`` (default) defers to ``pandoravisibility``
+            (currently 1e-3).
+        nirda_roi_x, nirda_roi_y : int, optional
+            NIRDA ROI size in pixels (across and along the dispersion) that
+            clips which neighbor light the trace check counts. ``None``
+            (default) defers to ``pandoravisibility`` (currently 80 x 256).
         """
         # Validate TLE format
         if not isinstance(tle_line1, str):
@@ -371,6 +392,10 @@ class ScheduleProcessor:
             earthlimb_day_min=self._to_deg(earthlimb_day_min),
             earthlimb_night_min=self._to_deg(earthlimb_night_min),
             use_dynamic_earthlimb=use_dynamic_earthlimb,
+            use_trace_sweep=use_trace_sweep,
+            trace_contamination_tol=trace_contamination_tol,
+            nirda_roi_x=nirda_roi_x,
+            nirda_roi_y=nirda_roi_y,
         )
         # Strip None entries so Visibility uses its own class-level defaults
         # for any constraint the caller left unset.
@@ -1096,7 +1121,12 @@ class ScheduleProcessor:
 
         # One roll per target per visit, chosen by pandoravisibility and
         # written onto the sequences, so every pass below judges an
-        # observation at the roll it will fly.
+        # observation at the roll it will fly. A target whose every
+        # observable roll fails the NIRDA trace check is dropped from the
+        # visit here, before trimming and growth, so neighbors can use the
+        # time. A fixed roll is not trace checked, so later passes would
+        # otherwise see it as visible.
+        trace_dropped = 0
         for visit in self._progress(
             working_calendar.visits,
             desc="Roll sweep",
@@ -1112,21 +1142,54 @@ class ScheduleProcessor:
                 ),
                 growth_margin_minutes=self.max_movement_minutes,
             )
+            blocked = set()
             for target, result in visit_rolls.items():
+                contamination = result.get("trace_contamination", np.nan)
                 self._print(
                     f"  Visit {visit.id} / {target}: roll "
                     f"{result['roll_deg']:.1f} deg, "
                     f"{result['n_scheduled_visible']} of "
                     f"{int(result['scheduled'].sum())} scheduled minutes "
                     "visible"
+                    + (
+                        f", trace contamination {contamination:.1e}"
+                        if np.isfinite(contamination)
+                        else ""
+                    )
                 )
-                if result["n_scheduled_visible"] == 0:
+                if result["trace_blocked"]:
+                    blocked.add(target)
+                    self._print(
+                        f"ERROR: Visit {visit.id} / {target}: dropped, "
+                        "every roll that sees it fails the NIRDA trace "
+                        f"check (tolerance "
+                        f"{self.visibility.trace_contamination_tol:g}); "
+                        f"best ranked roll {result['roll_deg']:.1f} deg "
+                        f"has contamination {contamination:.1e}, the "
+                        "cleanest roll "
+                        f"{result['trace_min_roll_deg']:.1f} deg has "
+                        f"{result['trace_min_contamination']:.1e}"
+                    )
+                elif result["n_scheduled_visible"] == 0:
                     self._print(
                         f"ERROR: Visit {visit.id} / {target}: no roll "
                         "makes any scheduled minute visible; flying "
                         f"{result['roll_deg']:.1f} deg (best for the star "
                         "trackers alone, then for solar power)"
                     )
+            if blocked:
+                kept = [s for s in visit.sequences if s.target not in blocked]
+                trace_dropped += len(visit.sequences) - len(kept)
+                visit.sequences = kept
+        if trace_dropped:
+            # Only visits the drop emptied can be empty here.
+            working_calendar.visits = [
+                visit for visit in working_calendar.visits if visit.sequences
+            ]
+        if getattr(self, "gap_report", None):
+            self.gap_report["processing_summary"][
+                "trace_dropped"
+            ] = trace_dropped
 
         # Observations keep the times the long-term calendar gave them and
         # are adjusted in place. Idle time between them is expected under
@@ -4148,7 +4211,17 @@ class ScheduleProcessor:
             "Drop_Priority0": str(getattr(self, "drop_priority0", False)),
             "Roll_Step_Deg": f"{float(self.roll_step):g}",
             "Min_Power_Frac": f"{float(self.min_power_frac):g}",
+            "Use_Trace_Sweep": str(
+                bool(getattr(nominal, "use_trace_sweep", False))
+            ),
         }
+        if getattr(nominal, "use_trace_sweep", False):
+            settings["Trace_Contamination_Tol"] = (
+                f"{float(nominal.trace_contamination_tol):g}"
+            )
+            settings["Trace_NIRDA_ROI"] = (
+                f"{nominal.nirda_roi_x}x{nominal.nirda_roi_y}"
+            )
         # A keepout with no value is left out rather than written empty:
         # Priority_0_Earthlimb_Min_Deg absent means it was not in use.
         return {k: v for k, v in settings.items() if v is not None}
@@ -4350,6 +4423,7 @@ class ScheduleProcessor:
                 "minutes_grown_at_stops": 0,
                 "minutes_taken_from_lower_priority": 0,
                 "priority_0_dropped": 0,
+                "trace_dropped": 0,
                 "boundaries_clamped": 0,
                 "overlaps_repaired": 0,
                 "original_gap_time_minutes": 0,

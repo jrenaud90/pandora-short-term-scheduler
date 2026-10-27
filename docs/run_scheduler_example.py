@@ -46,10 +46,10 @@ plot_rolls = False
 # Spacecraft two-line element set (TLE) describing the orbit used for
 # visibility, power, and gap calculations. Refresh this for each new run.
 new_tle1 = (
-    "1 67395U 80229J   26223.79570602  .00000000  00000-0  37770-3 0    02"
+    "1 67395U 80229J   26299.74557870  .00000000  00000-0 -66906-8 0    01"
 )
 new_tle2 = (
-    "2 67395  97.8072 221.5977 0003967 320.1766 134.7478 14.88176196    03"
+    "2 67395  97.8118 296.4355 0006875  60.8910 247.3904 14.88227073    01"
 )
 
 # ---------------------------------------------------------------------------
@@ -69,7 +69,7 @@ scheduler = ScheduleProcessor(
     new_tle1,
     new_tle2,
     earthlimb_gap_tolerance=6,  # max allowed Earth-limb gap (minutes)
-    st_gap_tolerance=12,  # max allowed star-tracker gap (minutes)
+    st_gap_tolerance=16,  # max allowed star-tracker gap (minutes)
     st_gap_tolerance_start_buffer=7.5,  # buffer time at the start of an observation before a ST gap is tolerated.
     earthlimb_gap_tolerance_start_buffer=7.5,  # buffer time at the start of an observation before a Earth-limb gap is tolerated.
     earthlimb_day_min=44,  # min Earth-limb angle, daytime (deg)
@@ -81,10 +81,14 @@ scheduler = ScheduleProcessor(
     st_moon_min=20,  # min star-tracker Moon angle (deg)
     st_earthlimb_min=30,  # min star-tracker Earth-limb angle (deg)
     use_dynamic_earthlimb=True,  # Use dynamic DPC Earth Limb keepout flag.
+    use_trace_sweep=True,  # reject rolls where neighbor stars' NIRDA traces contaminate the target; a target no observable roll passes is dropped from that visit. Needs the gaiaoffline database.
+    trace_contamination_tol=1e-3,  # max worst-row neighbor/target flux in the NIRDA extraction aperture
+    nirda_roi_x=80,  # NIRDA ROI columns (across the dispersion) the trace check counts light in
+    nirda_roi_y=256,  # NIRDA ROI rows (along the dispersion) the trace check counts light in
     roll_step=1.0,  # roll search step size (deg)
     min_power_frac=0.68,  # min acceptable orbit-average power fraction
     grow_by_priority=True,  # higher priorities grow first and may take time from lower-priority neighbors
-    drop_priority0=False,  # let a priority 1/2 grow past (and drop) a priority 0, or merge across priority-0 filler
+    drop_priority0=True,  # let a priority 1/2 grow past (and drop) a priority 0, or merge across priority-0 filler
     convert_single_roi_to_predefined=True,  # single auto-detect ROI -> predefined ROI at target RA/Dec
     fix_bad_data=True,  # replace invalid name symbols (e.g. "+") and report NaN-like values
     # ----------------------------------------------------------------------
@@ -111,7 +115,7 @@ scheduler = ScheduleProcessor(
             },
             "AcquireVisCamScienceData": {
                 "FramesPerCoadd": 50,
-                "StarRoiDimension": 50,
+                "StarRoiDimension": 75,
             },
         },
         "Priority_1": {
@@ -132,7 +136,7 @@ scheduler = ScheduleProcessor(
                 "SC_Groups": 2,
             },
             "AcquireVisCamScienceData": {
-                "StarRoiDimension": 50,
+                "StarRoiDimension": 75,
                 "FramesPerCoadd": 50,
             },
         },
@@ -152,7 +156,7 @@ scheduler = ScheduleProcessor(
                 "SC_Groups": 2,
             },
             "AcquireVisCamScienceData": {
-                "StarRoiDimension": 50,
+                "StarRoiDimension": 75,
                 "FramesPerCoadd": 50,
             },
         },
@@ -264,6 +268,16 @@ illumination_fig = visualizer.plot_earth_illumination(
 illumination_fig.savefig(
     output_dir / f"{calendar_name}_earth_illumination.png", dpi=300
 )
+
+# ---------------------------------------------------------------------------
+# Simulated detector fields
+# ---------------------------------------------------------------------------
+# One NIRDA subarray (neighbor traces, contamination) and one VISDA frame per
+# target, each at the target's duration-weighted mean roll for the week.
+# Reads the gaiaoffline database.
+print("\n\nCreating simulated NIRDA/VISDA fields...")
+fields_fig = visualizer.plot_target_fields(processed_calendar)
+fields_fig.savefig(output_dir / f"{calendar_name}_target_fields.png", dpi=150)
 
 # Display all open figures.
 plt.show()
