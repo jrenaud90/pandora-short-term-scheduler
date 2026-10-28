@@ -46,10 +46,10 @@ plot_rolls = False
 # Spacecraft two-line element set (TLE) describing the orbit used for
 # visibility, power, and gap calculations. Refresh this for each new run.
 new_tle1 = (
-    "1 67395U 80229J   26299.74557870  .00000000  00000-0 -66906-8 0    01"
+    "1 67395U 80229J   26300.82081019  .00000000  00000-0  25284-5 0    00"
 )
 new_tle2 = (
-    "2 67395  97.8118 296.4355 0006875  60.8910 247.3904 14.88227073    01"
+    "2 67395  97.8121 297.4948 0006830  58.6710 246.7835 14.88256756    04"
 )
 
 # ---------------------------------------------------------------------------
@@ -81,7 +81,7 @@ scheduler = ScheduleProcessor(
     st_moon_min=20,  # min star-tracker Moon angle (deg)
     st_earthlimb_min=30,  # min star-tracker Earth-limb angle (deg)
     use_dynamic_earthlimb=True,  # Use dynamic DPC Earth Limb keepout flag.
-    use_trace_sweep=True,  # reject rolls where neighbor stars' NIRDA traces contaminate the target; a target no observable roll passes is dropped from that visit. Needs the gaiaoffline database.
+    use_trace_sweep=False,  # reject rolls where neighbor stars' NIRDA traces contaminate the target; a target no observable roll passes is dropped from that visit. Needs the gaiaoffline database.
     trace_contamination_tol=1e-3,  # max worst-row neighbor/target flux in the NIRDA extraction aperture
     nirda_roi_x=80,  # NIRDA ROI columns (across the dispersion) the trace check counts light in
     nirda_roi_y=256,  # NIRDA ROI rows (along the dispersion) the trace check counts light in

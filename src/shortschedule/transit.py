@@ -14,8 +14,9 @@ transit timing follows ``pandoraobservations.transits.transit_contacts``.
 # Standard library
 import json
 import re
+import subprocess
 from pathlib import Path
-from typing import Dict, Tuple
+from typing import Dict, Optional, Tuple
 
 # Third-party
 import numpy as np
@@ -45,23 +46,39 @@ def planet_key(name: str) -> str:
     return re.sub(r"[^0-9a-z]", "", str(name).lower())
 
 
-def load_ephemerides(target_list_dir) -> Dict[str, dict]:
-    """Transit ephemeris of every planet in a PandoraTargetList tree.
+def load_ephemerides(
+    target_list_dir, reference_time: Optional[Time] = None
+) -> Dict[str, dict]:
+    """Transit ephemeris of every planet in one PandoraTargetList tree.
+
+    Every ``*_target_definition.json`` in the checkout's own
+    ``target_definition_files`` that the checked-out branch tracks is
+    read (``git ls-files``; every file when the tree is not a git checkout
+    or git is missing). A clone of another branch nested in the checkout,
+    or an untracked file, is not. A planet defined in more than one
+    category takes the definition whose mid-transit uncertainty,
+    ``sqrt(sigma_T0^2 + (n sigma_P)^2)`` propagated to ``reference_time``,
+    is smallest; one without uncertainties ranks last, and ties go to the
+    first in path order. Categories can disagree (on ``main`` in 2026-11,
+    TOI-2076b's by 20 min).
 
     Parameters
     ----------
     target_list_dir : str or Path
         A PandoraTargetList checkout, or its ``target_definition_files``
         directory.
+    reference_time : astropy.time.Time, optional
+        Date the uncertainties are propagated to; now when omitted.
 
     Returns
     -------
     dict
         ``planet_key`` of the planet name to ``planet_name``,
         ``period_days``, ``epoch_bjd_tdb``, ``duration_hr``, ``ra_deg``,
-        ``dec_deg`` and ``definition_file``. A planet listed in several
-        categories takes its first definition in path order; one missing
-        any of those values is left out.
+        ``dec_deg``, ``mid_sigma_min`` (the propagated uncertainty, inf
+        without one) and ``definition_file`` (relative to
+        ``target_definition_files``). A definition missing any ephemeris
+        value is skipped.
 
     Raises
     ------
@@ -76,9 +93,27 @@ def load_ephemerides(target_list_dir) -> Dict[str, dict]:
             f"{target_list_dir} is not a PandoraTargetList checkout or its "
             "target_definition_files directory."
         )
+    reference_jd = (reference_time or Time.now()).jd
+
+    # Only what the checked-out branch tracks: an untracked file, or a clone
+    # of another branch dropped inside the tree, is not part of it. Outside
+    # a git checkout, or without git, every file is read.
+    paths = sorted(tree.rglob("*_target_definition.json"))
+    try:
+        listed = subprocess.run(
+            ["git", "ls-files", "-z"],
+            cwd=tree,
+            capture_output=True,
+            check=True,
+        ).stdout.decode("utf-8")
+    except (OSError, subprocess.CalledProcessError):
+        listed = None
+    if listed is not None:
+        tracked = set(listed.split("\0"))
+        paths = [p for p in paths if p.relative_to(tree).as_posix() in tracked]
 
     ephemerides: Dict[str, dict] = {}
-    for path in sorted(tree.rglob("*_target_definition.json")):
+    for path in paths:
         try:
             info = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
@@ -86,8 +121,23 @@ def load_ephemerides(target_list_dir) -> Dict[str, dict]:
         values = {key: info.get(name) for key, name in DEFINITION_KEYS.items()}
         if any(value is None for value in values.values()):
             continue
+        sigma_period = info.get("Period Uncertainty (days)")
+        sigma_epoch = info.get("Transit Epoch Uncertainty (days)")
+        n_orbits = (reference_jd - values["epoch_bjd_tdb"]) / values[
+            "period_days"
+        ]
+        values["mid_sigma_min"] = (
+            np.inf
+            if sigma_period is None or sigma_epoch is None
+            else float(np.hypot(sigma_epoch, n_orbits * sigma_period) * 1440)
+        )
         values["definition_file"] = str(path.relative_to(tree))
-        ephemerides.setdefault(planet_key(values["planet_name"]), values)
+        key = planet_key(values["planet_name"])
+        if (
+            key not in ephemerides
+            or values["mid_sigma_min"] < ephemerides[key]["mid_sigma_min"]
+        ):
+            ephemerides[key] = values
     return ephemerides
 
 

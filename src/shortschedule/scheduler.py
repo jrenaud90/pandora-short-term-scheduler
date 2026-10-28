@@ -381,8 +381,9 @@ class ScheduleProcessor:
         target_list_dir : str or Path, optional
             A PandoraTargetList checkout (or its ``target_definition_files``
             directory) whose transit ephemerides switch on the transit
-            constraint for priority-2 observations. ``None`` (default)
-            leaves it off.
+            constraint for priority-2 observations; a planet defined in
+            more than one category takes its most precise ephemeris (see
+            ``transit.load_ephemerides``). ``None`` (default) leaves it off.
         transit_middle_frac : float, optional
             Share of a transit's total duration, centered on mid-transit,
             that forms its core (default 0.75).

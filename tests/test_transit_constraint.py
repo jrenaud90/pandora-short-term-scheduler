@@ -9,6 +9,8 @@ ephemeris reading and core timing, the guard itself, and that a pass
 
 # Standard library
 import json
+import shutil
+import subprocess
 
 # Third-party
 import numpy as np
@@ -105,6 +107,72 @@ class TestEphemerides:
     def test_a_missing_tree_raises(self, tmp_path):
         with pytest.raises(FileNotFoundError):
             load_ephemerides(tmp_path)
+
+    def test_one_tree_only_and_the_most_precise_wins(self, tmp_path):
+        """A clone nested in the checkout (another branch) is not read;
+        within the tree, precision beats path order."""
+        definition = {
+            "Planet Name": "TOI-270 d",
+            "Period (days)": 11.38,
+            "Transit Epoch (BJD_TDB)": 2458389.5,
+            "Transit Duration (hrs)": 2.1,
+            "RA": 68.4,
+            "DEC": -51.9,
+            "Period Uncertainty (days)": 1e-4,
+            "Transit Epoch Uncertainty (days)": 1e-3,
+        }
+        loose = tmp_path / "target_definition_files" / "exoplanet"
+        tight = tmp_path / "target_definition_files" / "time-critical"
+        only_nested = tmp_path / "Nested" / "target_definition_files" / "x"
+        for folder in (loose, tight, only_nested):
+            folder.mkdir(parents=True)
+        (loose / "TOI-270d_target_definition.json").write_text(
+            json.dumps(definition)
+        )
+        (tight / "TOI-270d_target_definition.json").write_text(
+            json.dumps(dict(definition, **{"Period (days)": 11.379}))
+            .replace("0.0001", "1e-06")
+        )
+        (only_nested / "HD_20329b_target_definition.json").write_text(
+            json.dumps(dict(definition, **{"Planet Name": "HD_20329b"}))
+        )
+
+        ephemerides = load_ephemerides(
+            tmp_path, reference_time=Time("2026-11-05")
+        )
+        assert set(ephemerides) == {"toi270d"}
+        assert ephemerides["toi270d"]["period_days"] == 11.379
+        assert "time-critical" in ephemerides["toi270d"]["definition_file"]
+
+    @pytest.mark.skipif(shutil.which("git") is None, reason="needs git")
+    def test_only_files_the_branch_tracks_are_read(self, tmp_path):
+        tree = tmp_path / "target_definition_files" / "exoplanet"
+        tree.mkdir(parents=True)
+        definition = {
+            "Planet Name": "A-1b",
+            "Period (days)": 1.5,
+            "Transit Epoch (BJD_TDB)": 2459000.0,
+            "Transit Duration (hrs)": 1.0,
+            "RA": 1.0,
+            "DEC": 2.0,
+        }
+        for name in ("A-1b", "B-1b"):
+            (tree / f"{name}_target_definition.json").write_text(
+                json.dumps(dict(definition, **{"Planet Name": name}))
+            )
+        git = ["git", "-c", "user.name=t", "-c", "user.email=t@t"]
+        subprocess.run(git + ["init", "-q"], cwd=tmp_path, check=True)
+        subprocess.run(
+            git
+            + ["add", "target_definition_files/exoplanet/A-1b_target_definition.json"],
+            cwd=tmp_path,
+            check=True,
+        )
+        subprocess.run(
+            git + ["commit", "-q", "-m", "a"], cwd=tmp_path, check=True
+        )
+
+        assert set(load_ephemerides(tmp_path)) == {"a1b"}
 
     def test_core_is_the_middle_of_the_transit(self):
         mid = CORE_START + (CORE_STOP - CORE_START) / 2
