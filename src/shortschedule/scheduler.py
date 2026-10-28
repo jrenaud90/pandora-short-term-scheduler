@@ -188,6 +188,7 @@ class ScheduleProcessor:
         trace_contamination_tol: Optional[float] = None,
         nirda_roi_x: Optional[int] = None,
         nirda_roi_y: Optional[int] = None,
+        drop_observations_based_on_trace: bool = False,
         target_list_dir: Optional[str] = None,
         transit_middle_frac: float = 0.75,
         transit_duration_constraint_min: float = 15.0,
@@ -366,8 +367,8 @@ class ScheduleProcessor:
             NIRDA traces contaminate the target's spectrum by more than
             ``trace_contamination_tol``, taking the best ranked roll that
             passes. A target that some roll could see but no such roll
-            passes is dropped from that visit (logged as an error). Needs
-            the gaiaoffline database. ``None`` (default) defers to
+            passes is handled by ``drop_observations_based_on_trace``.
+            Needs the gaiaoffline database. ``None`` (default) defers to
             ``pandoravisibility``, which currently switches it on.
         trace_contamination_tol : float, optional
             Largest acceptable trace contamination: the worst extraction
@@ -378,6 +379,13 @@ class ScheduleProcessor:
             NIRDA ROI size in pixels (across and along the dispersion) that
             clips which neighbor light the trace check counts. ``None``
             (default) defers to ``pandoravisibility`` (currently 80 x 256).
+        drop_observations_based_on_trace : bool, optional
+            What happens to a target in a visit that some roll could see
+            but where every such roll fails the trace check. True drops
+            its observations from that visit (and the visit if that empties
+            it), logged as a warning, before trimming and growth so
+            neighbors can use the time. False (default) keeps them at the
+            best ranked roll, trace failure and all, logged as an error.
         target_list_dir : str or Path, optional
             A PandoraTargetList checkout (or its ``target_definition_files``
             directory) whose transit ephemerides switch on the transit
@@ -464,6 +472,7 @@ class ScheduleProcessor:
         # Roll sweep configuration
         self.roll_step = roll_step
         self.min_power_frac = min_power_frac
+        self.drop_observations_based_on_trace = drop_observations_based_on_trace
 
         # Priority-2 transit constraint; planet key to ephemeris, empty
         # (constraint off) without a PandoraTargetList.
@@ -1155,10 +1164,11 @@ class ScheduleProcessor:
         # One roll per target per visit, chosen by pandoravisibility and
         # written onto the sequences, so every pass below judges an
         # observation at the roll it will fly. A target whose every
-        # observable roll fails the NIRDA trace check is dropped from the
-        # visit here, before trimming and growth, so neighbors can use the
-        # time. A fixed roll is not trace checked, so later passes would
-        # otherwise see it as visible.
+        # observable roll fails the NIRDA trace check is reported, and with
+        # drop_observations_based_on_trace dropped from the visit here,
+        # before trimming and growth, so neighbors can use the time. A
+        # fixed roll is not trace checked, so later passes see a kept one
+        # as visible.
         trace_dropped = 0
         for visit in self._progress(
             working_calendar.visits,
@@ -1191,11 +1201,9 @@ class ScheduleProcessor:
                     )
                 )
                 if result["trace_blocked"]:
-                    blocked.add(target)
-                    self._print(
-                        f"ERROR: Visit {visit.id} / {target}: dropped, "
-                        "every roll that sees it fails the NIRDA trace "
-                        f"check (tolerance "
+                    failure = (
+                        f"Visit {visit.id} / {target}: every roll that sees "
+                        "it fails the NIRDA trace check (tolerance "
                         f"{self.visibility.trace_contamination_tol:g}); "
                         f"best ranked roll {result['roll_deg']:.1f} deg "
                         f"has contamination {contamination:.1e}, the "
@@ -1203,6 +1211,15 @@ class ScheduleProcessor:
                         f"{result['trace_min_roll_deg']:.1f} deg has "
                         f"{result['trace_min_contamination']:.1e}"
                     )
+                    if getattr(self, "drop_observations_based_on_trace", False):
+                        blocked.add(target)
+                        self._print(f"WARNING: {failure}. Dropped.")
+                    else:
+                        self._print(
+                            f"ERROR: {failure}. Kept, flying "
+                            f"{result['roll_deg']:.1f} deg "
+                            "(drop_observations_based_on_trace is off)."
+                        )
                 elif result["n_scheduled_visible"] == 0:
                     self._print(
                         f"ERROR: Visit {visit.id} / {target}: no roll "
@@ -4464,6 +4481,9 @@ class ScheduleProcessor:
             )
             settings["Trace_NIRDA_ROI"] = (
                 f"{nominal.nirda_roi_x}x{nominal.nirda_roi_y}"
+            )
+            settings["Drop_Observations_Based_On_Trace"] = str(
+                bool(getattr(self, "drop_observations_based_on_trace", False))
             )
         transit_on = bool(
             getattr(self, "transit_ephemerides", None)

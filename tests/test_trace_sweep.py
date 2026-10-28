@@ -138,9 +138,11 @@ class TestKwargs:
             assert (vis.nirda_roi_x, vis.nirda_roi_y) == (60, 200)
 
 
-def test_a_trace_rejected_target_is_dropped_from_its_visit(
-    monkeypatch, tmp_path
+@pytest.mark.parametrize("drop", [True, False])
+def test_a_trace_rejected_target_is_dropped_or_reported(
+    monkeypatch, tmp_path, drop
 ):
+    """Dropped with a warning when asked, otherwise kept with an error."""
     sample = (
         Path(shortschedule.__file__).parent
         / "data"
@@ -164,7 +166,9 @@ def test_a_trace_rejected_target_is_dropped_from_its_visit(
         "shortschedule.scheduler.Visibility",
         lambda *a, **k: _TraceVisibility(blocked={key}),
     )
-    scheduler = ScheduleProcessor("LINE1", "LINE2")
+    scheduler = ScheduleProcessor(
+        "LINE1", "LINE2", drop_observations_based_on_trace=drop
+    )
     processed = scheduler.process_calendar(
         calendar,
         window_start=window_start.isot,
@@ -174,8 +178,21 @@ def test_a_trace_rejected_target_is_dropped_from_its_visit(
     )
 
     remaining = [s for v in processed.visits for s in v.sequences]
-    assert not any(round(float(s.ra), 6) == key for s in remaining)
-    assert all(visit.sequences for visit in processed.visits)
+    n_kept = sum(round(float(s.ra), 6) == key for s in remaining)
     summary = scheduler.get_gap_report()["processing_summary"]
-    assert summary["trace_dropped"] == n_rejected
-    assert scheduler.run_error_count > 0
+    errors_log = "".join(
+        path.read_text() for path in tmp_path.glob("*errors*")
+    )
+    trace_lines = [
+        line for line in errors_log.splitlines() if "NIRDA trace" in line
+    ]
+    assert trace_lines
+    if drop:
+        assert n_kept == 0
+        assert all(visit.sequences for visit in processed.visits)
+        assert summary["trace_dropped"] == n_rejected
+        assert all("WARNING" in line and "Dropped" in line for line in trace_lines)
+    else:
+        assert n_kept > 0
+        assert summary["trace_dropped"] == 0
+        assert all("ERROR" in line and "Kept" in line for line in trace_lines)
