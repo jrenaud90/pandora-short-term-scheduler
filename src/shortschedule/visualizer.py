@@ -3044,7 +3044,9 @@ class ScheduleVisualizer:
         angular radius over the span.
 
         Dots are transparent so repeated visits to the same phase space
-        stack up visibly.
+        stack up visibly.  The first minute of each observation is an
+        opaque star in the target's color; back-to-back observations of
+        the same target form one run and get one star.
 
         Parameters
         ----------
@@ -3061,6 +3063,7 @@ class ScheduleVisualizer:
         -------
         matplotlib.figure.Figure
         """
+        from matplotlib.lines import Line2D
         from pandoravisibility import Visibility
 
         from .pointing import AXES, IDLE_LABEL
@@ -3122,6 +3125,23 @@ class ScheduleVisualizer:
                     color=colors[target],
                     alpha=0.35,
                     linewidths=0,
+                )
+                # An opaque star on the first minute of each observation,
+                # so the direction each trail runs can be read.
+                starts = [
+                    start
+                    for start, _, label in timeline.segments
+                    if label == target
+                ]
+                ax.scatter(
+                    timeline.angles[(axis, "earth")][starts],
+                    timeline.illumination[axis][starts],
+                    s=90,
+                    marker="*",
+                    color=colors[target],
+                    edgecolors="black",
+                    linewidths=0.4,
+                    zorder=4,
                 )
             ax.axhline(90.0, color="gray", linestyle=":", linewidth=1.0)
 
@@ -3193,8 +3213,21 @@ class ScheduleVisualizer:
                     zorder=5,
                     label=label,
                 )
-            if lines:
-                ax.legend(loc="lower right", fontsize=7)
+            handles, _ = ax.get_legend_handles_labels()
+            handles.append(
+                Line2D(
+                    [],
+                    [],
+                    linestyle="none",
+                    marker="*",
+                    markersize=9,
+                    color="gray",
+                    markeredgecolor="black",
+                    markeredgewidth=0.4,
+                    label="observation start",
+                )
+            )
+            ax.legend(handles=handles, loc="lower right", fontsize=7)
 
             ax.set_title(axis, fontsize=11, fontweight="bold")
             ax.set_xlabel("Angle to Earth center (deg)")
