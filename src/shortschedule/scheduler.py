@@ -610,7 +610,11 @@ class ScheduleProcessor:
         window_start : str or astropy.time.Time, optional
             ISO string or Time object indicating the window start.
         window_duration_days : int, optional
-            Number of days to include in the processing window.
+            Number of days to include in the processing window. The window
+            is a hard boundary: an observation the long-term calendar runs
+            across either edge is cut at it, growth stops at it (with a
+            warning when the target would have stayed visible past it), and
+            nothing in the returned calendar reaches outside it.
         merge_similar_observations : bool, optional
             When True, adjacent observation sequences in the same visit that
             share the same target and pointing are merged into a single
@@ -785,7 +789,34 @@ class ScheduleProcessor:
         window_duration_days: int,
         verbose: bool,
     ) -> ScienceCalendar:
-        """Extract time-based window from calendar."""
+        """Extract the observations inside the schedule window.
+
+        The window, ``[window_start, window_start + window_duration_days)``,
+        is a hard boundary: the delivered calendar never reaches outside
+        it. Every observation that overlaps the window is kept, and one the
+        long-term calendar runs across either edge is cut at that edge with
+        a warning, so the week before and the week after each fly their own
+        part of it. A cut that leaves less than ``min_sequence_duration`` is
+        a warning too; with ``drop_priority0`` a priority 0 cut that short
+        is dropped instead, while any other is kept short. The input
+        calendar is not modified.
+
+        Parameters
+        ----------
+        calendar : ScienceCalendar
+            The long-term calendar.
+        window_start : str or astropy.time.Time
+            Start of the window (ISO string or Time, UTC).
+        window_duration_days : float
+            Length of the window in days.
+        verbose : bool
+            Unused; kept for the call signature.
+
+        Returns
+        -------
+        ScienceCalendar
+            A new calendar holding only the window's observations.
+        """
         if isinstance(window_start, str):
             window_start = Time(window_start, format="isot", scale="utc")
 
@@ -798,7 +829,7 @@ class ScheduleProcessor:
 
         self._print(f"Extracting window: {window_start} to {window_end}")
 
-        # Find sequences within window
+        clipped = dropped = 0
         windowed_visits = []
         for visit in calendar.visits:
             # complain if there are empty visits
@@ -808,21 +839,75 @@ class ScheduleProcessor:
                 )
             windowed_sequences = []
             for seq in visit.sequences:
-                seq_start = seq.start_time
-                seq_stop = seq.stop_time
-
-                # Include sequence if it overlaps with window. First complete sequence.
-                if (
-                    seq_start < window_end
-                    and seq_stop > window_start
-                    and seq_start >= window_start
+                # In seconds with a millisecond tolerance: a window end
+                # built from fractional days can sit a few nanoseconds off
+                # an observation that starts or stops exactly on it.
+                if not (
+                    (window_end - seq.start_time).sec > 1e-3
+                    and (seq.stop_time - window_start).sec > 1e-3
                 ):
+                    continue
+                cut_start = (window_start - seq.start_time).sec > 1e-3
+                cut_stop = (seq.stop_time - window_end).sec > 1e-3
+                if not (cut_start or cut_stop):
                     windowed_sequences.append(seq)
+                    continue
+
+                # Cut a copy, so the caller's calendar keeps its times.
+                inside = seq.copy()
+                if cut_start:
+                    inside.start_time = window_start
+                if cut_stop:
+                    inside.stop_time = window_end
+                edges = " and ".join(
+                    edge
+                    for edge, cut in (
+                        (
+                            "starts before the window start "
+                            f"{window_start.isot}",
+                            cut_start,
+                        ),
+                        (
+                            f"stops after the window end {window_end.isot}",
+                            cut_stop,
+                        ),
+                    )
+                    if cut
+                )
+                message = (
+                    f"{self._seq_prefix(visit.id, seq)} | WINDOW: the "
+                    f"long-term calendar {edges}; cut to "
+                    f"{inside.start_time.isot} - {inside.stop_time.isot}"
+                )
+                if self._below_minimum_duration(inside.duration):
+                    message += (
+                        f", leaving {inside.duration.sec / 60:.1f} min, "
+                        "under "
+                        f"{self.min_sequence_duration.sec / 60:.0f} min"
+                    )
+                    if int(seq.priority or 0) == 0 and getattr(
+                        self, "drop_priority0", False
+                    ):
+                        self._print(
+                            f"WARNING: {message}. Dropped (drop_priority0)."
+                        )
+                        dropped += 1
+                        continue
+                self._print(f"WARNING: {message}.")
+                windowed_sequences.append(inside)
+                clipped += 1
 
             if windowed_sequences:
                 windowed_visits.append(
                     Visit(id=visit.id, sequences=windowed_sequences)
                 )
+
+        if getattr(self, "gap_report", None):
+            summary = self.gap_report["processing_summary"]
+            summary["window_clipped"] = clipped
+            summary["priority_0_dropped"] = (
+                summary.get("priority_0_dropped", 0) + dropped
+            )
 
         return ScienceCalendar(
             metadata=calendar.metadata, visits=windowed_visits
@@ -1908,7 +1993,9 @@ class ScheduleProcessor:
         - the neighboring observations, so growth can never create an
           overlap, and
         - ``max_movement_minutes`` either side of the long-term start and
-          stop, so an observation grows in place instead of drifting.
+          stop, so an observation grows in place instead of drifting, and
+        - the schedule window, a hard boundary. Growth it stops while the
+          target is still visible is reported as a warning.
 
         With ``grow_by_priority`` the walk runs priority 2 first, then 1,
         then 0, and a lower-priority neighbor is a soft bound: the grower
@@ -1931,6 +2018,8 @@ class ScheduleProcessor:
         gained_starts = gained_stops = taken = 0
         # (visit_id, seq_id) of priority-0 observations eaten by growth.
         self._dropped_by_growth = set()
+        # Boundaries already warned about as held at the window edge.
+        self._window_reported = set()
 
         for index in self._progress(
             walk, desc="Growing into idle time", total=len(walk)
@@ -1971,9 +2060,12 @@ class ScheduleProcessor:
         summary["minutes_grown_at_starts"] = gained_starts
         summary["minutes_grown_at_stops"] = gained_stops
         summary["minutes_taken_from_lower_priority"] = taken
-        summary["priority_0_dropped"] = len(self._dropped_by_growth)
+        # Added to: window extraction may already have dropped some.
+        summary["priority_0_dropped"] = summary.get(
+            "priority_0_dropped", 0
+        ) + len(self._dropped_by_growth)
         self._print(
-            f"Grew observations into idle time: {gained_starts} min added "
+            f"Grew observations into idle time:{gained_starts} min added "
             f"at starts, {gained_stops} min added at stops, {taken} min of "
             "that taken from lower-priority neighbors, "
             f"{len(self._dropped_by_growth)} priority-0 observation(s) "
@@ -2001,6 +2093,17 @@ class ScheduleProcessor:
             edge, bound = seq.start_time, original[0] - limit * u.min
         else:
             edge, bound = seq.stop_time, original[1] + limit * u.min
+        # The schedule window is a hard boundary. Room the movement limit
+        # would give past it is only looked at, to report it.
+        window_edge = getattr(
+            self, "window_start" if direction < 0 else "window_end", None
+        )
+        past_window = None
+        if (
+            window_edge is not None
+            and direction * (bound - window_edge).sec > 0
+        ):
+            past_window, bound = bound, window_edge
         own_bound = bound
 
         # The neighbor on this side, and how far into it the grower may
@@ -2095,12 +2198,20 @@ class ScheduleProcessor:
                     else neighbor.stop_time
                 )
             bound = max(bound, reach) if direction < 0 else min(bound, reach)
+        # The window, not a neighbor, is what stops this side.
+        held_by_window = (
+            past_window is not None and abs((bound - window_edge).sec) < 1e-3
+        )
 
         # Whole seconds before the floor division: a bound built from the
         # neighbor's long-term time can come out a nanosecond short of the
         # minute and would otherwise lose a whole minute of room.
         room = int(np.rint((direction * (bound - edge)).sec) // 60)
         if room <= 0:
+            if held_by_window:
+                self._warn_growth_past_window(
+                    visit_id, seq, direction, window_edge, past_window
+                )
             return 0, 0
         if direction < 0:
             times = edge - np.arange(1, room + 1) * u.min
@@ -2115,6 +2226,10 @@ class ScheduleProcessor:
             seq.roll,
             visibility=model,
         )
+        if held_by_window and gained == room:
+            self._warn_growth_past_window(
+                visit_id, seq, direction, window_edge, past_window
+            )
         if gained <= 0:
             return 0, 0
         new_edge = edge + direction * gained * u.min
@@ -2214,6 +2329,68 @@ class ScheduleProcessor:
                 "limit."
             )
         return gained, taken
+
+    def _warn_growth_past_window(
+        self,
+        visit_id: Any,
+        seq: ObservationSequence,
+        direction: int,
+        window_edge: Time,
+        movement_bound: Time,
+    ) -> None:
+        """Warn that visibility would grow an observation past the window.
+
+        Growth has already stopped at the window; this only reports the
+        minutes, up to the movement limit, that the target stays visible
+        beyond it. Reported once per boundary per run.
+
+        Parameters
+        ----------
+        visit_id : str
+            The observation's visit.
+        seq : ObservationSequence
+            The observation, its boundary sitting on the window edge.
+        direction : int
+            -1 for the start (window start), +1 for the stop (window end).
+        window_edge : astropy.time.Time
+            The window edge on this side.
+        movement_bound : astropy.time.Time
+            How far the movement limit alone would have let it grow.
+        """
+        reported = self.__dict__.setdefault("_window_reported", set())
+        key = (visit_id, seq.id, direction)
+        if key in reported:
+            return
+        extra_room = int(
+            np.rint((direction * (movement_bound - window_edge)).sec) // 60
+        )
+        if extra_room <= 0:
+            return
+        if direction < 0:
+            times = window_edge - np.arange(1, extra_room + 1) * u.min
+        else:
+            times = window_edge + np.arange(extra_room) * u.min
+        coord = SkyCoord(seq.ra, seq.dec, frame="icrs", unit="deg")
+        extra = self._growable_minutes(
+            self._visibility_for_sequence(seq, coord, times),
+            times,
+            coord,
+            seq.roll,
+            visibility=self._visibility_for_priority(seq.priority),
+        )
+        if extra <= 0:
+            return
+        reported.add(key)
+        side, name = (
+            ("before its start", "window start")
+            if direction < 0
+            else ("after its stop", "window end")
+        )
+        self._print(
+            f"WARNING: {self._seq_prefix(visit_id, seq)} | WINDOW: "
+            f"visibility allows {extra} more min {side}, past the {name} "
+            f"{window_edge.isot}; held to the window."
+        )
 
     def _growable_minutes(
         self,
@@ -2444,8 +2621,9 @@ class ScheduleProcessor:
           opens visible is pushed past the last dark second in it.
         - Out: a boundary with no dark second inside that minute moves
           outward over the seconds the target stays visible, up to a
-          minute, never past a neighbor or ``max_movement_minutes`` from
-          its long-term time. A visible second clears both start buffers,
+          minute, never past a neighbor, the schedule window, or
+          ``max_movement_minutes`` from its long-term time. A visible
+          second clears both start buffers,
           so a start moved earlier this way still opens cleanly.
 
         A boundary whose own minute sample is dark was left there by an
@@ -2471,6 +2649,9 @@ class ScheduleProcessor:
             The same calendar, boundaries refined.
         """
         limit = getattr(self, "max_movement_minutes", 0) or 0
+        # The schedule window is a hard boundary for moving out.
+        window_start = getattr(self, "window_start", None)
+        window_end = getattr(self, "window_end", None)
         ordered = self._ordered_sequences(calendar)
         offsets = np.arange(-60, 60)
         seconds_in = seconds_out = moved_in = moved_out = 0
@@ -2519,6 +2700,8 @@ class ScheduleProcessor:
                             free,
                             room((start - (original[0] - limit * u.min)).sec),
                         )
+                    if window_start is not None:
+                        free = min(free, room((start - window_start).sec))
                     dark = np.flatnonzero(~outside_start)
                     visible = 60 - (int(dark[-1]) + 1) if dark.size else 60
                     new_start = start - min(visible, free) * u.s
@@ -2537,6 +2720,8 @@ class ScheduleProcessor:
                             free,
                             room(((original[1] + limit * u.min) - stop).sec),
                         )
+                    if window_end is not None:
+                        free = min(free, room((window_end - stop).sec))
                     dark = np.flatnonzero(~outside_stop)
                     visible = int(dark[0]) if dark.size else 60
                     new_stop = stop + min(visible, free) * u.s
@@ -4921,6 +5106,7 @@ class ScheduleProcessor:
                 "transit_changes_refused": 0,
                 "boundaries_clamped": 0,
                 "overlaps_repaired": 0,
+                "window_clipped": 0,
                 "edge_seconds_cut": 0,
                 "edge_seconds_grown": 0,
                 "original_gap_time_minutes": 0,
@@ -5091,6 +5277,9 @@ class ScheduleProcessor:
             f"  Overlaps Repaired: {summary.get('overlaps_repaired', 0)}"
         )
         self._print(
+            f"  Cut At The Window Edges: {summary.get('window_clipped', 0)}"
+        )
+        self._print(
             f"  Edges Refined To The Second: "
             f"{summary.get('edge_seconds_cut', 0)} s cut where the target "
             f"is not visible, {summary.get('edge_seconds_grown', 0)} s grown"
@@ -5244,18 +5433,21 @@ class ScheduleProcessor:
     ) -> Dict[str, Any]:
         """Comprehensive timing validation.
 
-        Checks for overlaps, short sequences, and large gaps.
-        Each sub-issue includes a ``message`` with actionable detail.
+        Checks for overlaps, short sequences, observations reaching outside
+        the schedule window (once ``process_calendar`` has set one), and
+        large gaps. Each sub-issue includes a ``message`` with actionable
+        detail.
 
         Returns
         -------
         dict
-            Keys: ``overlaps``, ``short_sequences``, ``large_gaps``,
-            ``timing_summary``.
+            Keys: ``overlaps``, ``short_sequences``, ``outside_window``,
+            ``large_gaps``, ``timing_summary``.
         """
         issues: Dict[str, Any] = {
             "overlaps": [],
             "short_sequences": [],
+            "outside_window": [],
             "large_gaps": [],
             "timing_summary": {},
         }
@@ -5316,6 +5508,36 @@ class ScheduleProcessor:
                 }
                 issues["short_sequences"].append(short_issue)
 
+        # Nothing may reach outside the schedule window. Extraction and
+        # growth both hold to it, so a hit here is a scheduler bug.
+        window_start = getattr(self, "window_start", None)
+        window_end = getattr(self, "window_end", None)
+        if window_start is not None and window_end is not None:
+            for seq_info in all_sequences:
+                seq = seq_info["sequence"]
+                before = (window_start - seq.start_time).sec
+                after = (seq.stop_time - window_end).sec
+                if before <= 1e-3 and after <= 1e-3:
+                    continue
+                message = (
+                    f"Seq {seq.id} ({seq.target}) in visit "
+                    f"{seq_info['visit_id']}: "
+                    f"{seq.start_time.isot} - {seq.stop_time.isot} reaches "
+                    f"outside the window {window_start.isot} - "
+                    f"{window_end.isot}."
+                )
+                self._print(f"ERROR: {message}")
+                issues["outside_window"].append(
+                    {
+                        "sequence_id": seq.id,
+                        "target": seq.target,
+                        "visit_id": seq_info["visit_id"],
+                        "start_time": seq.start_time,
+                        "stop_time": seq.stop_time,
+                        "message": message,
+                    }
+                )
+
         # Check for large gaps between sequences
         max_acceptable_gap = 2.0 * u.minute  # 2 minutes
         for i in range(len(all_sequences) - 1):
@@ -5356,9 +5578,11 @@ class ScheduleProcessor:
             "total_sequences": len(all_sequences),
             "overlaps_found": len(issues["overlaps"]),
             "short_sequences_found": len(issues["short_sequences"]),
+            "outside_window_found": len(issues["outside_window"]),
             "large_gaps_found": len(issues["large_gaps"]),
             "total_issues": len(issues["overlaps"])
             + len(issues["short_sequences"])
+            + len(issues["outside_window"])
             + len(issues["large_gaps"]),
         }
 
@@ -5396,6 +5620,18 @@ class ScheduleProcessor:
                     self._print(f"  {i+1}. {sh['message']}")
             else:
                 self._print("\u2713 SHORT SEQUENCES: None found")
+
+            self._print()
+
+            if issues["outside_window"]:
+                self._print(
+                    f"OUTSIDE THE WINDOW "
+                    f"({len(issues['outside_window'])} found):"
+                )
+                for i, out in enumerate(issues["outside_window"]):
+                    self._print(f"  {i+1}. {out['message']}")
+            else:
+                self._print("\u2713 OUTSIDE THE WINDOW: None found")
 
             self._print()
 
@@ -6185,6 +6421,11 @@ class ScheduleProcessor:
             if summary["short_sequences_found"]:
                 self._print(
                     f"  - {summary['short_sequences_found']} sequences too short"
+                )
+            if summary["outside_window_found"]:
+                self._print(
+                    f"  - {summary['outside_window_found']} sequences "
+                    "outside the window"
                 )
             if summary["large_gaps_found"]:
                 self._print(f"  - {summary['large_gaps_found']} large gaps")
