@@ -69,8 +69,11 @@ def parse_science_calendar(
             "calendar_weights": meta.get("Calendar_Weights"),
             "ephemeris": meta.get("Ephemeris"),
             "keepout_angles": meta.get("Keepout_Angles"),
+            # Long-term calendars write the ``_max`` name; the bare one is
+            # read as a fallback.
             "observation_sequence_duration": meta.get(
-                "Observation_Sequence_Duration_hrs"
+                "Observation_Sequence_Duration_hrs_max",
+                meta.get("Observation_Sequence_Duration_hrs"),
             ),
             "removed_sequences_shorter_than": meta.get(
                 "Removed_Sequences_Shorter_Than_min"

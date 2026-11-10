@@ -192,6 +192,12 @@ class ScheduleProcessor:
         target_list_dir: Optional[str] = None,
         transit_middle_frac: float = 0.75,
         transit_duration_constraint_min: float = 15.0,
+        add_high_pri_observations: bool = False,
+        high_priority_adds_earthlimb_min: Optional[float] = None,
+        high_priority_adds_min_duration: float = 10.0,
+        high_priority_adds_max_duration: float = 90.0,
+        high_priority_adds_min_observations: int = 5,
+        high_priority_adds_transit_buffer_min: float = 40.0,
     ) -> None:
         """
         Initialize the scheduler with TLE and parameters.
@@ -431,6 +437,34 @@ class ScheduleProcessor:
             below it for a transit the long-term calendar already left
             short, is refused; overlap repair still applies but is logged
             as an error. 0 turns the constraint off.
+        add_high_pri_observations : bool, optional
+            After the final merge, fill idle time with extra observations
+            of the window's priority 1/2 targets, one new visit per target
+            appended to the calendar (default False). Each target flies
+            the roll of its original visit with the most minutes of it, and
+            the payload of its priority 1/2 observation there. Additions
+            cover only idle minutes where the target is visible at that
+            roll every minute; where targets compete, one in its padded
+            transit window wins, then the longest stretch. An addition is
+            priority 1 when it overlaps the planet's T1-T4 widened by
+            ``high_priority_adds_transit_buffer_min`` on each side, else
+            priority 0 (always 0 without ``target_list_dir``). The transit
+            core constraint does not apply to additions.
+        high_priority_adds_earthlimb_min : float, optional
+            Flat Earth-limb keepout (degrees) for the additions, with every
+            other keepout standard. ``None`` (default) uses the standard
+            keepouts.
+        high_priority_adds_min_duration : float, optional
+            Shortest addition in minutes (default 10).
+        high_priority_adds_max_duration : float, optional
+            Longest addition in minutes (default 90); a longer free,
+            visible stretch is split.
+        high_priority_adds_min_observations : int, optional
+            A target with fewer additions gets no visit, and its time is
+            offered to the other targets (default 5).
+        high_priority_adds_transit_buffer_min : float, optional
+            Minutes added before T1 and after T4 for the priority-1 window
+            (default 40).
         """
         # Validate TLE format
         if not isinstance(tle_line1, str):
@@ -467,21 +501,41 @@ class ScheduleProcessor:
         # Targets other than their visit's main target may be held further
         # off the Earth limb so the spacecraft can dissipate more heat.
         # Every other keepout, the star trackers included, is unchanged
-        self.occultation_earthlimb_min = occultation_earthlimb_min
-        self.occultation_visibility = None
-        if occultation_earthlimb_min is not None:
-            _occ_kw = dict(_kw)
+        def _flat_earthlimb_model(angle):
+            flat_kw = dict(_kw)
             # Explicit None, not a pop: dropping the key lets Visibility
             # fall back to its own day/night defaults, which since v1.3.0
             # are real angles rather than None. Those would then override
-            # the flat occultation_earthlimb_min the caller asked for.
-            _occ_kw["earthlimb_day_min"] = None
-            _occ_kw["earthlimb_night_min"] = None
-            _occ_kw["use_dynamic_earthlimb"] = False
-            _occ_kw["earthlimb_min"] = self._to_deg(occultation_earthlimb_min)
-            self.occultation_visibility = Visibility(
-                tle_line1, tle_line2, **_occ_kw
-            )
+            # the flat angle the caller asked for.
+            flat_kw["earthlimb_day_min"] = None
+            flat_kw["earthlimb_night_min"] = None
+            flat_kw["use_dynamic_earthlimb"] = False
+            flat_kw["earthlimb_min"] = self._to_deg(angle)
+            return Visibility(tle_line1, tle_line2, **flat_kw)
+
+        self.occultation_earthlimb_min = occultation_earthlimb_min
+        self.occultation_visibility = (
+            None
+            if occultation_earthlimb_min is None
+            else _flat_earthlimb_model(occultation_earthlimb_min)
+        )
+
+        # High-priority additions in free time, with their own flat limb.
+        self.add_high_pri_observations = add_high_pri_observations
+        self.high_priority_adds_earthlimb_min = high_priority_adds_earthlimb_min
+        self.high_priority_adds_visibility = (
+            self.visibility
+            if high_priority_adds_earthlimb_min is None
+            else _flat_earthlimb_model(high_priority_adds_earthlimb_min)
+        )
+        self.high_priority_adds_min_duration = high_priority_adds_min_duration
+        self.high_priority_adds_max_duration = high_priority_adds_max_duration
+        self.high_priority_adds_min_observations = (
+            high_priority_adds_min_observations
+        )
+        self.high_priority_adds_transit_buffer_min = (
+            high_priority_adds_transit_buffer_min
+        )
         # Targets that keep the standard keepouts though not main. Held
         # cleaned, and every target is cleaned before it is compared, so
         # either spelling matches before or after _normalize_target_names.
@@ -722,6 +776,13 @@ class ScheduleProcessor:
         if merge_similar_observations:
             processed_calendar = self._merge_similar_observations(
                 processed_calendar, verbose
+            )
+
+        # Extra observations of the week's priority 1/2 targets in the idle
+        # time left once everything above has settled.
+        if getattr(self, "add_high_pri_observations", False):
+            processed_calendar = self._add_high_priority_observations(
+                processed_calendar
             )
 
         # Payload overrides, then NIRDA SC_Integrations and VISDA
@@ -1052,6 +1113,253 @@ class ScheduleProcessor:
         return ScienceCalendar(
             metadata=calendar.metadata, visits=windowed_visits
         )
+
+    # ------------------------------------------------------------------
+    # High-priority additions in free time
+    # ------------------------------------------------------------------
+    def _add_high_priority_observations(
+        self, calendar: ScienceCalendar
+    ) -> ScienceCalendar:
+        """Fill idle time with extra observations of priority 1/2 targets.
+
+        Runs after the final merge, so nothing already scheduled moves, and
+        before the payload update, so the additions get their own
+        integration and frame counts. Each target with a priority 1/2
+        observation in the window is a candidate. It flies the roll of its
+        visit with the most minutes of it (the earlier visit on a tie) and
+        the payload of its first priority 1/2 observation there, judged
+        under ``high_priority_adds_visibility``.
+
+        A slot is a run of whole idle minutes in the window where the
+        target is visible at both ends of every minute, at least
+        ``high_priority_adds_min_duration`` and at most
+        ``high_priority_adds_max_duration`` long. Requiring every minute
+        means the start buffers hold without a separate check. Slots are
+        taken one at a time: one overlapping its padded transit window
+        first, then the longest, then the target with the fewest added
+        minutes so far, then the earliest; every other slot is then
+        clipped to what is still idle. A target left with fewer than
+        ``high_priority_adds_min_observations`` additions is dropped with a
+        warning and the selection is redone without it, so its time can go
+        to the others.
+
+        Each remaining target gets one new visit at the end of the
+        calendar. An addition is priority 1 when it overlaps the target's
+        T1-T4 widened by ``high_priority_adds_transit_buffer_min`` on each
+        side, else priority 0, and is flagged ``is_added`` (and
+        ``is_main``, as its visit's only target). With
+        ``refine_edges_to_second`` the additions then get the same 1 s edge
+        pass as everything else (``added_only``), without a movement limit.
+
+        Parameters
+        ----------
+        calendar : ScienceCalendar
+            The processed calendar; new visits are appended in place.
+
+        Returns
+        -------
+        ScienceCalendar
+            The same calendar.
+        """
+        window_start = self.window_start
+        n_minutes = int(
+            np.floor((self.window_end - window_start).to_value(u.min) + 1e-6)
+        )
+        # Every minute edge, so minute i is [times[i], times[i + 1]).
+        times = window_start + np.arange(n_minutes + 1) * u.min
+        min_length = int(np.ceil(self.high_priority_adds_min_duration - 1e-9))
+        max_length = int(np.floor(self.high_priority_adds_max_duration + 1e-9))
+
+        # Minutes touched by any observation, sub-minute edges included.
+        occupied = np.zeros(n_minutes, dtype=bool)
+        for visit in calendar.visits:
+            for seq in visit.sequences:
+                first = int(
+                    np.floor(
+                        (seq.start_time - window_start).to_value(u.min) + 1e-6
+                    )
+                )
+                last = int(
+                    np.ceil(
+                        (seq.stop_time - window_start).to_value(u.min) - 1e-6
+                    )
+                )
+                occupied[max(first, 0) : max(min(last, n_minutes), 0)] = True
+
+        # Each candidate's source visit: the one with the most minutes of
+        # it among those where it is priority 1/2, the earlier on a tie.
+        # Target -> ((seconds, -visit index), template observation, visit).
+        sources: Dict[str, Tuple[Any, ObservationSequence, str]] = {}
+        for order, visit in enumerate(calendar.visits):
+            by_target: Dict[str, List[ObservationSequence]] = {}
+            for seq in visit.sequences:
+                by_target.setdefault(seq.target, []).append(seq)
+            for target, sequences in by_target.items():
+                science = sorted(
+                    (s for s in sequences if int(s.priority or 0) in (1, 2)),
+                    key=lambda s: s.start_time,
+                )
+                if not science:
+                    continue
+                rank = (sum(s.duration.sec for s in sequences), -order)
+                if target not in sources or rank > sources[target][0]:
+                    sources[target] = (rank, science[0], visit.id)
+
+        if not getattr(self, "transit_ephemerides", None) and sources:
+            self._print(
+                "WARNING: HIGH-PRI ADD: no target_list_dir, so no transit is "
+                "known and every addition is priority 0."
+            )
+        model = self.high_priority_adds_visibility
+        usable: Dict[str, np.ndarray] = {}
+        in_window: Dict[str, np.ndarray] = {}
+        minute_index = np.arange(n_minutes)
+        for target, (_, template, _) in sources.items():
+            roll = None if template.roll is None else template.roll * u.deg
+            visible = np.asarray(
+                model.get_visibility(
+                    SkyCoord(template.ra, template.dec, unit="deg", frame="icrs"),
+                    times,
+                    roll=roll,
+                )["visible"],
+                dtype=bool,
+            )
+            usable[target] = visible[:-1] & visible[1:]
+
+            # Minutes overlapping T1 - buffer .. T4 + buffer of any transit.
+            in_window[target] = np.zeros(n_minutes, dtype=bool)
+            ephemerides = getattr(self, "transit_ephemerides", None) or {}
+            ephemeris = ephemerides.get(planet_key(target))
+            if ephemeris is None:
+                if ephemerides:
+                    self._print(
+                        f"WARNING: HIGH-PRI ADD: {target} has no transit "
+                        "ephemeris; its additions are priority 0."
+                    )
+                continue
+            buffer = self.high_priority_adds_transit_buffer_min * u.min
+            for epoch in range(
+                transit_epoch(ephemeris, times[0]) - 1,
+                transit_epoch(ephemeris, times[-1]) + 2,
+            ):
+                first_contact, last_contact = transit_core(ephemeris, epoch, 1.0)
+                low = (first_contact - buffer - window_start).to_value(u.min)
+                high = (last_contact + buffer - window_start).to_value(u.min)
+                in_window[target] |= (minute_index + 1 > low) & (
+                    minute_index < high
+                )
+
+        def _runs(mask):
+            edges = np.flatnonzero(np.diff(np.r_[0, mask.astype(int), 0]))
+            return zip(edges[::2], edges[1::2])
+
+        excluded = set()
+        while True:
+            free = ~occupied
+            placed: Dict[str, List[Tuple[int, int, bool]]] = {
+                target: [] for target in sources if target not in excluded
+            }
+            while True:
+                best = None
+                for target in placed:
+                    for start, stop in _runs(free & usable[target]):
+                        if stop - start < min_length:
+                            continue
+                        length = min(stop - start, max_length)
+                        # Where a run is longer than an addition may be,
+                        # place the addition on the transit window if any.
+                        transit = np.flatnonzero(in_window[target][start:stop])
+                        if len(transit):
+                            start = min(start + transit[0], stop - length)
+                        has_transit = bool(
+                            in_window[target][start : start + length].any()
+                        )
+                        # Equal lengths go to the target with the fewest
+                        # added minutes so far, so time is spread.
+                        given = sum(b - a for a, b, _ in placed[target])
+                        key = (has_transit, length, -given, -start)
+                        if best is None or key > best[0]:
+                            best = (key, target, start, start + length)
+                if best is None:
+                    break
+                (has_transit, _, _, _), target, start, stop = best
+                free[start:stop] = False
+                placed[target].append((start, stop, has_transit))
+
+            minimum = self.high_priority_adds_min_observations
+            thin = [t for t, adds in placed.items() if 0 < len(adds) < minimum]
+            if not thin:
+                break
+            for target in thin:
+                self._print(
+                    f"WARNING: HIGH-PRI ADD: {target} would get only "
+                    f"{len(placed[target])} addition(s), under "
+                    f"high_priority_adds_min_observations={minimum}; not "
+                    "added, and its time is offered to the other targets."
+                )
+            excluded.update(thin)
+
+        next_visit = 1 + max(
+            (int(v.id) for v in calendar.visits if str(v.id).isdigit()),
+            default=0,
+        )
+        for target in sorted(
+            (t for t, adds in placed.items() if adds),
+            key=lambda t: min(placed[t]),
+        ):
+            _, template, source_visit = sources[target]
+            visit_id = f"{next_visit:04d}"
+            next_visit += 1
+            sequences = []
+            for number, (start, stop, has_transit) in enumerate(
+                sorted(placed[target]), start=1
+            ):
+                seq = template.copy()
+                seq.id = f"{number:03d}"
+                seq.start_time = times[start]
+                seq.stop_time = times[stop]
+                seq.priority = 1 if has_transit else 0
+                seq.is_main = True
+                seq.is_added = True
+                sequences.append(seq)
+                self._print(
+                    f"{self._seq_prefix(visit_id, seq)} | HIGH-PRI ADD: "
+                    f"{stop - start} min of idle time, priority "
+                    f"{seq.priority}"
+                    + (" (padded transit window)" if has_transit else "")
+                    + f", roll and payload from visit {source_visit}."
+                )
+            calendar.visits.append(Visit(id=visit_id, sequences=sequences))
+
+        # The same 1 s edge pass as everything else, on the additions only.
+        # They have no long-term time, so no movement limit.
+        if getattr(self, "refine_edges_to_second", False) and any(
+            placed.values()
+        ):
+            self._refine_edges_to_second(calendar, {}, added_only=True)
+
+        added_visits = [
+            visit
+            for visit in calendar.visits
+            if any(getattr(seq, "is_added", False) for seq in visit.sequences)
+        ]
+        added_observations = sum(len(v.sequences) for v in added_visits)
+        added_minutes = round(
+            sum(s.duration.sec for v in added_visits for s in v.sequences)
+            / 60.0,
+            1,
+        )
+
+        if getattr(self, "gap_report", None):
+            summary = self.gap_report["processing_summary"]
+            summary["high_pri_added_visits"] = len(added_visits)
+            summary["high_pri_added_observations"] = added_observations
+            summary["high_pri_added_minutes"] = added_minutes
+        self._print(
+            f"High-priority additions: {added_observations} observation(s), "
+            f"{added_minutes} min, in {len(added_visits)} new visit(s)."
+        )
+        return calendar
 
     # Tolerances used when deciding whether two sequences can be merged.
     _MERGE_ADJACENCY_TOL_SEC = 1.0  # max stop-to-start gap (seconds)
@@ -1841,10 +2149,15 @@ class ScheduleProcessor:
         Returns
         -------
         pandoravisibility.Visibility
-            The occultation model when one is configured and this is
-            neither its visit's main target nor named in
-            ``occultation_overrides``, otherwise the nominal model.
+            For a high-priority addition (``is_added``), the additions
+            model. Otherwise the occultation model when one is configured
+            and this is neither its visit's main target nor named in
+            ``occultation_overrides``, else the nominal model.
         """
+        if getattr(seq, "is_added", False):
+            return getattr(
+                self, "high_priority_adds_visibility", None
+            ) or self.visibility
         occultation = getattr(self, "occultation_visibility", None)
         if (
             occultation is not None
@@ -2967,6 +3280,7 @@ class ScheduleProcessor:
         self,
         calendar: ScienceCalendar,
         original_timing: Dict[Any, Any],
+        added_only: bool = False,
     ) -> ScienceCalendar:
         """Move each start and stop to the second visibility puts it at.
 
@@ -3002,7 +3316,12 @@ class ScheduleProcessor:
             Calendar after overlap repair.
         original_timing : dict
             Long-term ``(start, stop)`` per ``(visit_id, sequence_id)``,
-            for the movement limit.
+            for the movement limit. An observation without an entry has no
+            movement limit.
+        added_only : bool, optional
+            Refine only high-priority additions (``is_added``); every other
+            observation still bounds its neighbors but is not moved, as it
+            was refined already. Default False.
 
         Returns
         -------
@@ -3029,6 +3348,8 @@ class ScheduleProcessor:
                 ordered, desc="Refining edges to the second", total=len(ordered)
             )
         ):
+            if added_only and not getattr(seq, "is_added", False):
+                continue
             start, stop = seq.start_time, seq.stop_time
             coord = SkyCoord(seq.ra, seq.dec, frame="icrs", unit="deg")
             # One query: the minute either side of the start, then of the
@@ -3152,14 +3473,21 @@ class ScheduleProcessor:
                 visit for visit in calendar.visits if visit.sequences
             ]
 
+        # Added to, as the pass also runs on the high-priority additions.
         summary = self.gap_report["processing_summary"]
-        summary["edge_seconds_cut"] = seconds_in
-        summary["edge_seconds_grown"] = seconds_out
+        summary["edge_seconds_cut"] = (
+            summary.get("edge_seconds_cut", 0) + seconds_in
+        )
+        summary["edge_seconds_grown"] = (
+            summary.get("edge_seconds_grown", 0) + seconds_out
+        )
         summary["priority_0_dropped"] = (
             summary.get("priority_0_dropped", 0) + len(dropped)
         )
         self._print(
-            f"Refined edges to the second: {moved_in} boundaries pulled in "
+            f"Refined edges to the second"
+            f"{' (high-priority additions)' if added_only else ''}: "
+            f"{moved_in} boundaries pulled in "
             f"({seconds_in} s), {moved_out} pushed out ({seconds_out} s), "
             f"{len(dropped)} priority-0 observation(s) dropped."
         )
@@ -5266,6 +5594,25 @@ class ScheduleProcessor:
             settings["Transit_Duration_Constraint_Min"] = (
                 f"{self.transit_duration_constraint_min:g}"
             )
+        adds_on = bool(getattr(self, "add_high_pri_observations", False))
+        settings["Add_High_Pri_Observations"] = str(adds_on)
+        if adds_on:
+            if self.high_priority_adds_earthlimb_min is not None:
+                settings["High_Priority_Adds_Earthlimb_Min_Deg"] = (
+                    f"{float(self.high_priority_adds_earthlimb_min):g}"
+                )
+            settings["High_Priority_Adds_Min_Duration_Min"] = (
+                f"{self.high_priority_adds_min_duration:g}"
+            )
+            settings["High_Priority_Adds_Max_Duration_Min"] = (
+                f"{self.high_priority_adds_max_duration:g}"
+            )
+            settings["High_Priority_Adds_Min_Observations"] = str(
+                self.high_priority_adds_min_observations
+            )
+            settings["High_Priority_Adds_Transit_Buffer_Min"] = (
+                f"{self.high_priority_adds_transit_buffer_min:g}"
+            )
         # A keepout with no value is left out rather than written empty:
         # Occultation_Earthlimb_Min_Deg absent means it was not in use.
         return {k: v for k, v in settings.items() if v is not None}
@@ -5476,6 +5823,9 @@ class ScheduleProcessor:
                 "merged_at_end": 0,
                 "edge_seconds_cut": 0,
                 "edge_seconds_grown": 0,
+                "high_pri_added_visits": 0,
+                "high_pri_added_observations": 0,
+                "high_pri_added_minutes": 0,
                 "original_gap_time_minutes": 0,
                 "duty_cycle_improvement_percent": 0,
                 "duration_improvement_minutes": 0,

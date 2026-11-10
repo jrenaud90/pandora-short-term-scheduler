@@ -365,16 +365,24 @@ class TestProcessCalendarMergeKwarg:
         self, monkeypatch, tmp_path, merge
     ):
         """SC_Integrations and NumTotalFramesRequested follow duration, so
-        they are computed after the last change to any start or stop."""
+        they are computed after the last change to any start or stop,
+        high-priority additions included."""
         monkeypatch.setattr(
             "shortschedule.scheduler.Visibility",
             _DummyVisibilityAllTrue,
         )
         cal = self._load_sample()
-        sched = ScheduleProcessor("L1", "L2")
+        sched = ScheduleProcessor("L1", "L2", add_high_pri_observations=True)
         calls = []
         original_merge = sched._merge_similar_observations
         original_update = sched._update_payload_parameters
+        original_adds = sched._add_high_priority_observations
+
+        def _adds(calendar):
+            calls.append("adds")
+            return original_adds(calendar)
+
+        monkeypatch.setattr(sched, "_add_high_priority_observations", _adds)
 
         def _merge(calendar, verbose=False, before_trims=False):
             calls.append("merge" if not before_trims else "early merge")
@@ -395,8 +403,12 @@ class TestProcessCalendarMergeKwarg:
             log_path=tmp_path / "run",
         )
 
+        # High-priority additions go in after the final merge, and get
+        # their counts with everything else.
         assert calls == (
-            ["early merge", "merge", "payload"] if merge else ["payload"]
+            ["early merge", "merge", "adds", "payload"]
+            if merge
+            else ["adds", "payload"]
         )
 
 

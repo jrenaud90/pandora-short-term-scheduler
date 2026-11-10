@@ -69,6 +69,7 @@ class ObservationSequence:
         payload_params: Dict[str, Any],
         roll: Optional[float] = None,
         is_main: bool = False,
+        is_added: bool = False,
     ):
         self.id = id
         self.target = target
@@ -83,6 +84,10 @@ class ObservationSequence:
         # standard keepouts. Set by ScheduleProcessor when it loads the
         # long-term calendar.
         self.is_main = is_main
+        # Whether ScheduleProcessor added this high-priority observation in
+        # free time (add_high_pri_observations); it flies that feature's
+        # keepouts.
+        self.is_added = is_added
 
     @property
     def duration(self) -> TimeDelta:
@@ -118,6 +123,7 @@ class ObservationSequence:
             payload_params=payload_copy,
             roll=self.roll,
             is_main=self.is_main,
+            is_added=self.is_added,
         )
 
     def _copy_xml_element(self, element):
