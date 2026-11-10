@@ -126,13 +126,13 @@ class TestKwargs:
         scheduler = ScheduleProcessor(
             TLE1,
             TLE2,
-            priority_0_earthlimb_min=69,
+            occultation_earthlimb_min=69,
             use_trace_sweep=False,
             trace_contamination_tol=3e-3,
             nirda_roi_x=60,
             nirda_roi_y=200,
         )
-        for vis in (scheduler.visibility, scheduler.priority_0_visibility):
+        for vis in (scheduler.visibility, scheduler.occultation_visibility):
             assert vis.use_trace_sweep is False
             assert vis.trace_contamination_tol == pytest.approx(3e-3)
             assert (vis.nirda_roi_x, vis.nirda_roi_y) == (60, 200)

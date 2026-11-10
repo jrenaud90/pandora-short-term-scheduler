@@ -308,9 +308,9 @@ class TestProcessCalendarMergeKwarg:
         merged = []
         original = sched._merge_similar_observations
 
-        def _spy(calendar, verbose=False):
-            merged.append(calendar)
-            return original(calendar, verbose)
+        def _spy(calendar, verbose=False, before_trims=False):
+            merged.append(before_trims)
+            return original(calendar, verbose, before_trims=before_trims)
 
         monkeypatch.setattr(sched, "_merge_similar_observations", _spy)
 
@@ -320,7 +320,8 @@ class TestProcessCalendarMergeKwarg:
             window_duration_days=1,
             log_path=tmp_path / "run",
         )
-        assert merged, "merging should run when the kwarg is omitted"
+        # Once on the long-term times ahead of the trims, once at the end.
+        assert merged == [True, False]
         assert processed is not None
 
 

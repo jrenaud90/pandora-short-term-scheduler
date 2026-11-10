@@ -2162,10 +2162,11 @@ class ScheduleVisualizer:
 
                 # The roll written onto the observation is the one flown.
                 roll = seq.roll
-                # Judge each bar by the keepouts its own priority flies,
-                # so a stricter priority-0 Earth limb shows up here rather
-                # than the plot disagreeing with the delivered calendar.
-                model = scheduler._visibility_for_priority(seq.priority)
+                # Judge each bar by the keepouts it flies, so a non-main
+                # target's stricter occultation Earth limb shows up here
+                # rather than the plot disagreeing with the delivered
+                # calendar.
+                model = scheduler._visibility_for(seq)
                 if roll is not None:
                     vis = model.get_visibility(coord, times, roll=roll * u.deg)
                 else:
@@ -2191,6 +2192,14 @@ class ScheduleVisualizer:
             if key not in seen:
                 seen[key] = len(y_labels)
                 y_labels.append(f"{vid} / {seq.target}")
+        row_sequences = {}
+        for vid, seq, _, _ in rows:
+            row_sequences.setdefault(seen[(vid, seq.target)], []).append(seq)
+        row_kinds = set()
+        for y, sequences in row_sequences.items():
+            kind = self._row_kind(sequences)
+            self._shade_row(ax, y, kind)
+            row_kinds.add(kind)
 
         # Track x-extent for axis limits
         x_min = float("inf")
@@ -2337,6 +2346,7 @@ class ScheduleVisualizer:
         for p in used_priorities:
             c = priority_colors.get(p, "silver")
             legend_items.append(Patch(facecolor=c, label=f"Priority {p}"))
+        legend_items.extend(self._row_band_patches(row_kinds))
         ax.legend(
             handles=legend_items,
             loc="upper right",
@@ -2354,6 +2364,70 @@ class ScheduleVisualizer:
         # edge, where it gets clipped.
         fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.98))
         return fig
+
+    # The light band behind each row of a visit, by the keepout it flies:
+    # its main target, a target named in occultation_overrides, or any
+    # other target. Legend order follows this order.
+    _ROW_BANDS = {
+        "main": ("tab:blue", "Main target"),
+        "override": ("magenta", "Occultation override"),
+        "other": ("tab:green", "Non-main target"),
+    }
+    _ROW_BAND_ALPHA = 0.12
+
+    def _row_kind(self, sequences):
+        """Which band a row of one target's observations in a visit gets.
+
+        Parameters
+        ----------
+        sequences : list of ObservationSequence
+            The row's observations, all of one target in one visit.
+
+        Returns
+        -------
+        str
+            ``"main"`` for the visit's main target, ``"override"`` for a
+            target named in the scheduler's ``occultation_overrides``,
+            otherwise ``"other"``.
+        """
+        if any(getattr(seq, "is_main", False) for seq in sequences):
+            return "main"
+        overrides = getattr(self.scheduler, "_overrides_occultation", None)
+        if overrides is not None and overrides(sequences[0].target):
+            return "override"
+        return "other"
+
+    def _shade_row(self, ax, y, kind):
+        """Put the light band for ``kind`` behind row ``y``.
+
+        Parameters
+        ----------
+        ax : matplotlib.axes.Axes
+            The Gantt axes.
+        y : float
+            The row's center; rows are one unit tall.
+        kind : str
+            A key of ``_ROW_BANDS``, from :meth:`_row_kind`.
+        """
+        ax.axhspan(
+            y - 0.5,
+            y + 0.5,
+            facecolor=self._ROW_BANDS[kind][0],
+            alpha=self._ROW_BAND_ALPHA,
+            edgecolor="none",
+            zorder=0,
+        )
+
+    def _row_band_patches(self, kinds):
+        """Legend entries for the row bands in ``kinds``, in a fixed order."""
+        # Third-party
+        from matplotlib.patches import Patch
+
+        return [
+            Patch(facecolor=color, alpha=self._ROW_BAND_ALPHA, label=label)
+            for kind, (color, label) in self._ROW_BANDS.items()
+            if kind in kinds
+        ]
 
     def _get_priority_colors(self, priorities):
         """Generate better color scheme for priorities with more distinct colors."""
@@ -2447,6 +2521,7 @@ class ScheduleVisualizer:
             # Plot each target within this visit
             for target in sorted_targets:
                 sequences = sequences_by_target[target]
+                self._shade_row(ax, y_pos, self._row_kind(sequences))
 
                 # Plot all sequences for this target
                 for seq_idx, seq in enumerate(sequences):
@@ -2593,6 +2668,15 @@ class ScheduleVisualizer:
             legend_elements.append(
                 Patch(facecolor=color, alpha=1.0, label=label)
             )
+        rows = {}
+        for visit in calendar.visits:
+            for seq in visit.sequences:
+                rows.setdefault((visit.id, seq.target), []).append(seq)
+        legend_elements.extend(
+            self._row_band_patches(
+                {self._row_kind(sequences) for sequences in rows.values()}
+            )
+        )
 
         if legend_elements:
             fig.legend(
@@ -3031,7 +3115,7 @@ class ScheduleVisualizer:
         the dynamic DPC wedge when ``use_dynamic_earthlimb`` is set (110,
         82 and 75 deg from the Earth center at 78, 89 and 90 deg of
         illumination), otherwise its day/night pair or flat limb angle,
-        plus the flat priority-0 limb when one is configured.  A star
+        plus the flat occultation limb when one is configured.  A star
         tracker's Earth-limb keep-out does not vary with illumination, so
         it is a vertical line.
 
@@ -3098,7 +3182,7 @@ class ScheduleVisualizer:
             )
         }
         strict = getattr(
-            getattr(self.scheduler, "priority_0_visibility", None),
+            getattr(self.scheduler, "occultation_visibility", None),
             "earthlimb_min",
             None,
         )
@@ -3183,7 +3267,7 @@ class ScheduleVisualizer:
                             np.full_like(illumination, strict_deg + radius),
                             illumination,
                             ":",
-                            f"priority 0: {strict_deg:.0f} deg above the limb",
+                            f"occultation: {strict_deg:.0f} deg above the limb",
                         )
                     )
             elif hasattr(visibility, "_st_earthlimb_min_for"):

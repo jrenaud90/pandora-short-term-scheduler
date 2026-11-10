@@ -40,6 +40,7 @@ class ObservationSequence:
         dec: float,
         payload_params: Dict[str, Any],
         roll: Optional[float] = None,
+        is_main: bool = False,
     ):
         self.id = id
         self.target = target
@@ -50,6 +51,10 @@ class ObservationSequence:
         self.dec = dec
         self.payload_params = payload_params
         self.roll = roll  # Spacecraft roll angle in degrees
+        # Whether this is its visit's main target, which always flies the
+        # standard keepouts. Set by ScheduleProcessor when it loads the
+        # long-term calendar.
+        self.is_main = is_main
 
     @property
     def duration(self) -> TimeDelta:
@@ -84,6 +89,7 @@ class ObservationSequence:
             dec=self.dec,
             payload_params=payload_copy,
             roll=self.roll,
+            is_main=self.is_main,
         )
 
     def _copy_xml_element(self, element):

@@ -8,7 +8,7 @@ how much each counts, and which keepout model applies.
 """
 
 # Standard library
-from typing import Any, Dict, Optional
+from typing import Any, Collection, Dict, Optional
 
 # Third-party
 import numpy as np
@@ -21,7 +21,8 @@ def get_best_roll_per_visit(
     visibility: Any,
     roll_step: float = 1.0,
     min_power_frac: Optional[float] = None,
-    priority_0_visibility: Any = None,
+    occultation_visibility: Any = None,
+    occultation_overrides: Collection[str] = (),
     growth_margin_minutes: float = 0.0,
 ) -> Dict[str, dict]:
     """Choose one roll per target in ``visit`` and write it onto its sequences.
@@ -43,11 +44,12 @@ def get_best_roll_per_visit(
         Sweep resolution in degrees.
     min_power_frac : float, optional
         Rolls whose mean solar power is below this are not considered.
-    priority_0_visibility : pandoravisibility.Visibility, optional
-        Stricter model used when every observation of a target in this
-        visit is priority 0. A target with mixed priorities keeps
-        ``visibility``, since one roll has to serve the whole visit and the
-        strictest member would over-constrain the rest.
+    occultation_visibility : pandoravisibility.Visibility, optional
+        Stricter model used for a target that is not the visit's main
+        target (``is_main`` False on its observations). The main target
+        keeps ``visibility``.
+    occultation_overrides : collection of str, optional
+        Target names that keep ``visibility`` though not main.
     growth_margin_minutes : float, optional
         Minutes on each side of every observation the roll should also try
         to keep visible, so growth has somewhere to go.
@@ -85,10 +87,12 @@ def get_best_roll_per_visit(
         weights = np.where(scheduled, int((~scheduled).sum()) + 1, 1)
 
         model = visibility
-        if priority_0_visibility is not None and all(
-            seq.priority == 0 for seq in sequences
+        if (
+            occultation_visibility is not None
+            and target not in occultation_overrides
+            and not any(getattr(seq, "is_main", False) for seq in sequences)
         ):
-            model = priority_0_visibility
+            model = occultation_visibility
         coord = SkyCoord(
             sequences[0].ra, sequences[0].dec, unit="deg", frame="icrs"
         )

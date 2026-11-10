@@ -28,7 +28,7 @@ from shortschedule.visualizer import ScheduleVisualizer
 # ---------------------------------------------------------------------------
 # Inputs — UPDATE ME between runs
 # ---------------------------------------------------------------------------
-xml_file_path = Path("G:\\","Other computers","Joe Desktop","Work Documents","Organizations","NASA - Pandora","Short Term Scheduler","WY46_2026-11-09","long-term","Pandora_science_calendar_HD_29037_window.xml")
+xml_file_path = Path("G:\\","Other computers","Joe Desktop","Work Documents","Organizations","NASA - Pandora","Short Term Scheduler","WY47_2026-11-16","Longterm","Pandora_science_calendar_HD_29037_window_JPR_Edit.xml")
 
 # Base name (without extension) used to label the output plots, e.g.
 # "Pandora_science_calendar".
@@ -36,7 +36,7 @@ calendar_name = xml_file_path.stem
 
 # Observing window: the short-term schedule is built starting at ``window_start``
 # and spanning ``window_duration_days``.
-window_start = Time("2026-11-09T00:00:00Z")
+window_start = Time("2026-11-16T00:00:00Z")
 window_duration_days = 7.0
 
 # Whether the visibility Gantt also paints the prescribed roll of each
@@ -46,10 +46,10 @@ plot_rolls = False
 # Spacecraft two-line element set (TLE) describing the orbit used for
 # visibility, power, and gap calculations. Refresh this for each new run.
 new_tle1 = (
-    "1 67395U 26004AJ  26307.75618341  .00000364  00000-0  45342-4 0  9990"
+    "1 67395U 26004AJ  26312.73151079  .00000754  00000-0  87514-4 0  9994"
 )
 new_tle2 = (
-    "2 67395  97.8123 304.3299 0006134  41.6656 318.5027 14.88249946 44036"
+    "2 67395  97.8123 309.2330 0005825  27.6787 332.4739 14.88257785 44777"
 )
 
 # ---------------------------------------------------------------------------
@@ -74,7 +74,8 @@ scheduler = ScheduleProcessor(
     earthlimb_gap_tolerance_start_buffer=7.5,  # buffer time at the start of an observation before a Earth-limb gap is tolerated.
     earthlimb_day_min=44,  # min Earth-limb angle, daytime (deg)
     earthlimb_night_min=13,  # min Earth-limb angle, nighttime (deg)
-    priority_0_earthlimb_min=69,  # if not `None`: min Earth-limb angle applied only to priority-0 targets so they can be used to dissipate heat. No day/night or dynamic illumination angle is used. All other keepouts are left the same.
+    occultation_earthlimb_min=69,  # if not `None`: min Earth-limb angle for every target except each visit's main target (its priority 1/2 target, else its non-Gaia target with the most minutes), so they can be used to dissipate heat. No day/night or dynamic illumination angle is used. All other keepouts are left the same.
+    occultation_overrides=['HD_29037'],  # list of target names that fly the standard keepouts even when not their visit's main target. Growth order is unchanged (still by priority).
     sun_min=91,  # min payload Sun keel angle (deg)
     moon_min=20,  # min payload Moon keel angle (deg)
     st_sun_min=50,  # min star-tracker Sun angle (deg)
@@ -91,7 +92,7 @@ scheduler = ScheduleProcessor(
     transit_duration_constraint_min=15,  # visible minutes of the core a transit's priority-2 observations must keep; shrinks that break this are refused (0 turns it off)
     roll_step=1.0,  # roll search step size (deg)
     min_power_frac=0.68,  # min acceptable orbit-average power fraction
-    grow_by_priority=True,  # higher priorities grow first and may take time from lower-priority neighbors
+    grow_by_priority=True,  # each visit's main target grows first, then the rest by priority; each may take time from lower-ranked neighbors
     drop_priority0=True,  # let a priority 1/2 grow past (and drop) a priority 0, or merge across priority-0 filler
     refine_edges_to_second=True,  # last pass: recheck the minute either side of every start/stop at 1 s and move it to the second the target is visible
     convert_single_roi_to_predefined=True,  # single auto-detect ROI -> predefined ROI at target RA/Dec

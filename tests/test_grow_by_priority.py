@@ -66,7 +66,7 @@ def test_higher_priority_takes_from_a_lower_neighbor_down_to_its_floor(
     summary = proc.gap_report["processing_summary"]
     assert summary["minutes_taken_from_lower_priority"] == 32
     out = capsys.readouterr().out
-    assert "GROWTH: took 32 min from lower-priority B" in out
+    assert "GROWTH: took 32 min from lower-ranked B" in out
     assert "ERROR" in out and "GROWTH BLOCKED: visibility allows 13" in out
 
 
@@ -91,6 +91,73 @@ def test_walk_order_is_priority_then_start_time(monkeypatch):
     )
     assert [sid for sid, _ in seen[::2]] == ["p2b", "p2a", "p1", "p0"]
     assert [direction for _, direction in seen] == [-1, 1] * 4
+
+
+def _main(seq):
+    seq.is_main = True
+    return seq
+
+
+def test_the_main_target_grows_first_whatever_its_priority(monkeypatch):
+    proc = _proc()
+    seen = []
+    monkeypatch.setattr(
+        proc,
+        "_grow_one_side",
+        lambda ordered, index, direction, timing: (
+            seen.append((ordered[index][1].id, direction)) or (0, 0)
+        ),
+    )
+    _grow(
+        proc,
+        [
+            _seq("p2", "B", 0, 10, 2),
+            _seq("p0", "C", 20, 10, 0),
+            _main(_seq("main", "A", 40, 10, 0)),
+            _seq("p1", "D", 60, 10, 1),
+        ],
+    )
+    assert [sid for sid, _ in seen[::2]] == ["main", "p2", "p1", "p0"]
+
+
+def test_a_priority_0_main_target_takes_from_a_priority_1_neighbor(capsys):
+    proc = _proc()
+    main, other = _grow(
+        proc,
+        [_main(_seq("s1", "A", 0, 20, 0)), _seq("s2", "B", 20, 40, 1)],
+    )
+    # B is held at its 8 min floor, as a lower priority would be.
+    assert (_minute(main.stop_time), _minute(other.start_time)) == (52, 52)
+    assert "GROWTH: took 32 min from lower-ranked B" in (
+        capsys.readouterr().out
+    )
+
+
+def test_nothing_takes_from_a_main_target():
+    """By priority alone the priority 2 would grow first and, with
+    drop_priority0, eat the priority 0 after it. As the main target that
+    priority 0 grows first instead, takes the priority 2 down to its
+    floor, and keeps it."""
+    proc = _proc(drop=True)
+    other, main = _grow(
+        proc,
+        [_seq("s1", "B", 0, 20, 2), _main(_seq("s2", "A", 20, 10, 0))],
+    )
+    assert (_minute(other.stop_time), _minute(main.start_time)) == (8, 8)
+    assert _minute(main.stop_time) == 75  # its own 45 min limit
+    assert proc.gap_report["processing_summary"]["priority_0_dropped"] == 0
+
+
+def test_an_override_still_grows_by_its_priority():
+    """occultation_overrides changes the keepout, not the rank: a
+    priority-0 override is taken from like any priority 0."""
+    proc = _proc()
+    proc.occultation_overrides = ["A"]
+    proc._occultation_override_names = frozenset({"A"})
+    low, high = _grow(
+        proc, [_seq("s1", "A", 0, 40, 0), _seq("s2", "B", 40, 20, 1)]
+    )
+    assert (_minute(low.stop_time), _minute(high.start_time)) == (8, 8)
 
 
 def test_equal_priority_neighbor_is_a_hard_bound(capsys):
@@ -194,12 +261,12 @@ def test_timing_log_says_why_each_boundary_moved(capsys):
     out = capsys.readouterr().out
     assert (
         "ELONGATED: stop later 32.0 min (duration 20.0 -> 52.0 min): "
-        "stop: grew 32 min, 32 of them taken from lower-priority B"
+        "stop: grew 32 min, 32 of them taken from lower-ranked B"
     ) in out
     assert (
         "ELONGATED: start later 32.0 min, stop later 45.0 min "
         "(duration 40.0 -> 53.0 min): start: gave 32 min to "
-        "higher-priority A; stop: grew 45 min into idle time"
+        "higher-ranked A; stop: grew 45 min into idle time"
     ) in out
 
 
