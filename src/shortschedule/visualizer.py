@@ -2129,7 +2129,7 @@ class ScheduleVisualizer:
         from mpl_toolkits.axes_grid1 import make_axes_locatable
 
         scheduler = self.scheduler
-        priority_colors = self._get_priority_colors([1, 2, 3, 4, 5, 6, 7, 8])
+        priority_colors = self._get_priority_colors(range(9))
 
         roll_cmap = cmr.infinity
         roll_norm = Normalize(vmin=-180.0, vmax=180.0)
@@ -2187,11 +2187,13 @@ class ScheduleVisualizer:
         # Build y-axis: one row per (visit, target)
         seen = {}
         y_labels = []
+        row_visits = []
         for vid, seq, _, _ in rows:
             key = (vid, seq.target)
             if key not in seen:
                 seen[key] = len(y_labels)
                 y_labels.append(f"{vid} / {seq.target}")
+                row_visits.append(vid)
         row_sequences = {}
         for vid, seq, _, _ in rows:
             row_sequences.setdefault(seen[(vid, seq.target)], []).append(seq)
@@ -2200,6 +2202,10 @@ class ScheduleVisualizer:
             kind = self._row_kind(sequences)
             self._shade_row(ax, y, kind)
             row_kinds.add(kind)
+        # A black line between visits; rows are grouped by visit in order.
+        for y in range(1, len(row_visits)):
+            if row_visits[y] != row_visits[y - 1]:
+                ax.axhline(y=y - 0.5, color="black", linewidth=1.5, zorder=2)
 
         # Track x-extent for axis limits
         x_min = float("inf")
@@ -2435,7 +2441,10 @@ class ScheduleVisualizer:
 
         # Define more distinct colors for priorities
         color_map = {
-            0: "lightgray",  # Priority 0 - light gray
+            # Priority 0 - mid gray: neutral so it reads as filler, but dark
+            # enough to show on the light row bands and still clearly lighter
+            # than the black used for non-visible minutes.
+            0: "#8c8c8c",
             1: "crimson",  # Highest priority - bright red (more distinct from red)
             2: "darkorange",  # High priority - dark orange (more distinct from red)
             3: "gold",  # Medium-high priority - gold
@@ -2586,9 +2595,7 @@ class ScheduleVisualizer:
 
             # Add visit separator line
             if visit_idx < len(sorted_visits) - 1:
-                ax.axhline(
-                    y=y_pos - 0.5, color="black", linewidth=2, alpha=0.7
-                )
+                ax.axhline(y=y_pos - 0.5, color="black", linewidth=2)
 
             y_pos += 0.2  # Small gap between visits
 

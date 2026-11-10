@@ -650,3 +650,35 @@ class TestRowsAreShaded:
         assert bands["main"][0] == "tab:blue"
         assert bands["override"][0] == "magenta"
         assert bands["other"][0] == "tab:green"
+
+    def test_visibility_plot_separates_visits_and_colors_priority_0(self):
+        # Two visits of two rows each: one line, between rows 1 and 2.
+        calendar = ScienceCalendar(
+            metadata={},
+            visits=[
+                _visit(("A", 1, 20), ("B", 0, 20), vid="v1"),
+                Visit(
+                    id="v2",
+                    sequences=[
+                        _seq("s0", "C", 1, start_min=40, duration_min=20),
+                        _seq("s1", "D", 0, start_min=60, duration_min=20),
+                    ],
+                ),
+            ],
+        )
+        visualizer = ScheduleVisualizer(ScheduleProcessor(TLE1, TLE2))
+        ax = visualizer.plot_gantt_with_visibility(calendar).axes[0]
+
+        separators = [
+            line.get_ydata()[0]
+            for line in ax.get_lines()
+            if line.get_color() == "black"
+        ]
+        assert separators == [1.5]
+        priority_0 = matplotlib.colors.to_rgba(
+            visualizer._get_priority_colors([0])[0]
+        )
+        assert priority_0 != matplotlib.colors.to_rgba("lightgray")
+        assert any(
+            patch.get_facecolor() == priority_0 for patch in ax.patches
+        )

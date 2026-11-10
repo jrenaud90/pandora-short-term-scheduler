@@ -28,7 +28,7 @@ from shortschedule.visualizer import ScheduleVisualizer
 # ---------------------------------------------------------------------------
 # Inputs — UPDATE ME between runs
 # ---------------------------------------------------------------------------
-xml_file_path = Path("G:\\","Other computers","Joe Desktop","Work Documents","Organizations","NASA - Pandora","Short Term Scheduler","WY47_2026-11-16","Longterm","Pandora_science_calendar_HD_29037_window_JPR_Edit.xml")
+xml_file_path = Path("N:\\","Joe Documents","Work Documents","Organizations","NASA - Pandora","Short Term Scheduler","WY47_2026-11-16","Longterm","Pandora_science_calendar_HD_29037_window_JPR_Edit - Copy.xml")
 
 # Base name (without extension) used to label the output plots, e.g.
 # "Pandora_science_calendar".
@@ -75,7 +75,7 @@ scheduler = ScheduleProcessor(
     earthlimb_day_min=44,  # min Earth-limb angle, daytime (deg)
     earthlimb_night_min=13,  # min Earth-limb angle, nighttime (deg)
     occultation_earthlimb_min=69,  # if not `None`: min Earth-limb angle for every target except each visit's main target (its priority 1/2 target, else its non-Gaia target with the most minutes), so they can be used to dissipate heat. No day/night or dynamic illumination angle is used. All other keepouts are left the same.
-    occultation_overrides=['HD_29037'],  # list of target names that fly the standard keepouts even when not their visit's main target. Growth order is unchanged (still by priority).
+    occultation_overrides=['HD_29037', 'TOI-5349'],  # list of target names that fly the standard keepouts even when not their visit's main target. Growth order is unchanged (still by priority).
     sun_min=91,  # min payload Sun keel angle (deg)
     moon_min=20,  # min payload Moon keel angle (deg)
     st_sun_min=50,  # min star-tracker Sun angle (deg)
@@ -87,7 +87,7 @@ scheduler = ScheduleProcessor(
     nirda_roi_x=80,  # NIRDA ROI columns (across the dispersion) the trace check counts light in
     nirda_roi_y=256,  # NIRDA ROI rows (along the dispersion) the trace check counts light in
     drop_observations_based_on_trace=False,  # a target whose every observable roll fails the trace check: True drops it from that visit (warning), False keeps it at its best ranked roll (error)
-    target_list_dir=Path("C:\\", "Gits", "PandoraTargetList_og"),  # PandoraTargetList checkout whose transit ephemerides hold priority-2 observations to their transits; None turns this off
+    target_list_dir=Path("N:\\", "Joe Documents", "Gits", "PandoraTargetList"),  # PandoraTargetList checkout whose transit ephemerides hold priority-2 observations to their transits; None turns this off
     transit_middle_frac=0.75,  # the middle fraction of each transit's duration (T14) that forms its core
     transit_duration_constraint_min=15,  # visible minutes of the core a transit's priority-2 observations must keep; shrinks that break this are refused (0 turns it off)
     roll_step=1.0,  # roll search step size (deg)
