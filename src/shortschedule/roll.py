@@ -15,6 +15,9 @@ import numpy as np
 from astropy import units as u
 from astropy.coordinates import SkyCoord
 
+# First-party/Local
+from .models import clean_target_name
+
 
 def get_best_roll_per_visit(
     visit: Any,
@@ -49,7 +52,9 @@ def get_best_roll_per_visit(
         target (``is_main`` False on its observations). The main target
         keeps ``visibility``.
     occultation_overrides : collection of str, optional
-        Target names that keep ``visibility`` though not main.
+        Target names that keep ``visibility`` though not main. Matched
+        with :func:`~shortschedule.models.clean_target_name` applied to
+        both sides.
     growth_margin_minutes : float, optional
         Minutes on each side of every observation the roll should also try
         to keep visible, so growth has somewhere to go.
@@ -71,6 +76,8 @@ def get_best_roll_per_visit(
         by_target.setdefault(seq.target, []).append(seq)
 
     margin = int(np.rint(growth_margin_minutes))
+    # Names are compared cleaned, as the scheduler does.
+    override_names = {clean_target_name(name) for name in occultation_overrides}
     results: Dict[str, dict] = {}
     for target, sequences in by_target.items():
         sequences = sorted(sequences, key=lambda s: s.start_time)
@@ -89,7 +96,7 @@ def get_best_roll_per_visit(
         model = visibility
         if (
             occultation_visibility is not None
-            and target not in occultation_overrides
+            and clean_target_name(target) not in override_names
             and not any(getattr(seq, "is_main", False) for seq in sequences)
         ):
             model = occultation_visibility

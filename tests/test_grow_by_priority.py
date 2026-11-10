@@ -98,54 +98,94 @@ def _main(seq):
     return seq
 
 
-def test_the_main_target_grows_first_whatever_its_priority(monkeypatch):
-    proc = _proc()
+def _grow_visits(proc, visits):
+    """Grow a calendar of ``visits``, each a list of sequences, in order."""
+    cal = ScienceCalendar(
+        metadata={},
+        visits=[
+            Visit(id=f"v{index}", sequences=sequences)
+            for index, sequences in enumerate(visits, start=1)
+        ],
+    )
+    proc._grow_into_free_time(cal, _timing(cal))
+    return [seq for visit in cal.visits for seq in visit.sequences]
+
+
+def _walk(monkeypatch, proc, visits):
     seen = []
     monkeypatch.setattr(
         proc,
         "_grow_one_side",
         lambda ordered, index, direction, timing: (
-            seen.append((ordered[index][1].id, direction)) or (0, 0)
+            seen.append(ordered[index][1].id) or (0, 0)
         ),
     )
-    _grow(
+    _grow_visits(proc, visits)
+    return seen[::2]
+
+
+def test_walk_order_is_priority_then_main_target(monkeypatch):
+    proc = _proc()
+    walk = _walk(
+        monkeypatch,
         proc,
         [
-            _seq("p2", "B", 0, 10, 2),
-            _seq("p0", "C", 20, 10, 0),
-            _main(_seq("main", "A", 40, 10, 0)),
-            _seq("p1", "D", 60, 10, 1),
+            [
+                _seq("p0", "C", 0, 10, 0),
+                _main(_seq("main", "A", 20, 10, 0)),
+                _seq("p1", "D", 40, 10, 1),
+                _seq("p2", "B", 60, 10, 2),
+            ]
         ],
     )
-    assert [sid for sid, _ in seen[::2]] == ["main", "p2", "p1", "p0"]
+    assert walk == ["p2", "p1", "main", "p0"]
 
 
-def test_a_priority_0_main_target_takes_from_a_priority_1_neighbor(capsys):
+def test_walk_order_breaks_a_tie_on_the_earlier_visit(monkeypatch):
+    """The later visit's observation starts first in time, but the
+    earlier visit walks first at equal rank."""
     proc = _proc()
-    main, other = _grow(
+    walk = _walk(
+        monkeypatch,
         proc,
-        [_main(_seq("s1", "A", 0, 20, 0)), _seq("s2", "B", 20, 40, 1)],
+        [[_seq("early", "A", 40, 10, 0)], [_seq("late", "B", 0, 10, 0)]],
     )
-    # B is held at its 8 min floor, as a lower priority would be.
-    assert (_minute(main.stop_time), _minute(other.start_time)) == (52, 52)
-    assert "GROWTH: took 32 min from lower-ranked B" in (
+    assert walk == ["early", "late"]
+
+
+def test_a_higher_priority_in_another_visit_takes_from_a_main_target(
+    capsys,
+):
+    """Across visits priority decides: a priority 1 takes from the
+    priority-0 main target of the visit before it, down to its floor."""
+    proc = _proc()
+    main, other = _grow_visits(
+        proc,
+        [[_main(_seq("s1", "A", 0, 20, 0))], [_seq("s2", "B", 20, 40, 1)]],
+    )
+    assert (_minute(main.stop_time), _minute(other.start_time)) == (8, 8)
+    assert "GROWTH: took 12 min from lower-ranked A" in (
         capsys.readouterr().out
     )
 
 
-def test_nothing_takes_from_a_main_target():
-    """By priority alone the priority 2 would grow first and, with
-    drop_priority0, eat the priority 0 after it. As the main target that
-    priority 0 grows first instead, takes the priority 2 down to its
-    floor, and keeps it."""
-    proc = _proc(drop=True)
+def test_within_a_visit_the_main_target_outranks_equal_priority():
+    proc = _proc()
     other, main = _grow(
-        proc,
-        [_seq("s1", "B", 0, 20, 2), _main(_seq("s2", "A", 20, 10, 0))],
+        proc, [_seq("s1", "B", 0, 20, 0), _main(_seq("s2", "A", 20, 40, 0))]
     )
     assert (_minute(other.stop_time), _minute(main.start_time)) == (8, 8)
-    assert _minute(main.stop_time) == 75  # its own 45 min limit
-    assert proc.gap_report["processing_summary"]["priority_0_dropped"] == 0
+
+
+def test_an_equal_rank_in_an_earlier_visit_takes_from_the_later_one():
+    """Same rank, different visits: the earlier visit takes from the
+    later one down to its floor; the later one cannot take back."""
+    proc = _proc()
+    early, late = _grow_visits(
+        proc,
+        [[_seq("s1", "A", 0, 20, 0)], [_seq("s2", "B", 20, 40, 0)]],
+    )
+    assert (_minute(early.stop_time), _minute(late.start_time)) == (52, 52)
 
 
 def test_an_override_still_grows_by_its_priority():

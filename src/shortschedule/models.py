@@ -25,6 +25,34 @@ import astropy.units as u
 import numpy as np
 from astropy.time import Time, TimeDelta
 
+# Characters that are not allowed in target name fields (``Target`` /
+# ``TargetID``) because they break downstream filename and identifier
+# handling. Each bad symbol is mapped to its safe replacement and substituted
+# by the ``fix_bad_data`` pass. Target names are compared in this cleaned form.
+BAD_NAME_SYMBOLS = {
+    "+": "_",
+    " ": "_",
+}
+
+
+def clean_target_name(name: str) -> str:
+    """Replace every :data:`BAD_NAME_SYMBOLS` character in ``name``.
+
+    Parameters
+    ----------
+    name : str
+        A target name as read.
+
+    Returns
+    -------
+    str
+        The name as the delivered calendar carries it, and the form every
+        target-name comparison (e.g. ``occultation_overrides``) uses.
+    """
+    for bad, good in BAD_NAME_SYMBOLS.items():
+        name = name.replace(bad, good)
+    return name
+
 
 class ObservationSequence:
     """Represents an observation sequence within a visit."""

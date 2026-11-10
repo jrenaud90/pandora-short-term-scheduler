@@ -171,6 +171,13 @@ def _parse_observation_sequence(
     priority_elem = obs_params_elem.find("pandora:Priority", namespace)
     priority = int(priority_elem.text) if priority_elem is not None else 0
 
+    # Written on short-term calendars only
+    visit_main_elem = obs_params_elem.find("pandora:VisitMain", namespace)
+    is_main = (
+        visit_main_elem is not None
+        and (visit_main_elem.text or "").strip().lower() == "true"
+    )
+
     # --- Parse timing ---
     timing_elem = obs_params_elem.find("pandora:Timing", namespace)
     if timing_elem is None:
@@ -222,6 +229,7 @@ def _parse_observation_sequence(
         dec=dec,
         payload_params=payload_params,
         roll=roll,
+        is_main=is_main,
     )
 
 

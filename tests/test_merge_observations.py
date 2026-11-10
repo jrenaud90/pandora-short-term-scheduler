@@ -7,13 +7,14 @@ into process_calendar via the merge_similar_observations kwarg:
 - Different targets / pointings are not merged
 - Non-contiguous (gapped) sequences are not merged
 - Merges never cross visit boundaries
-- The merged sequence keeps the first sequence's identity/payload and the
-  second sequence's stop time
+- The merged sequence keeps the first sequence's identity and the second
+  sequence's stop time, and the higher priority with that one's payload
 - The input calendar is not mutated
 - End-to-end wiring through process_calendar
 """
 
 # Standard library
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 # Third-party
@@ -97,6 +98,40 @@ class TestMergeSimilarObservations:
         assert merged.id == "s1"
         assert merged.start_time == seqA.start_time
         assert merged.stop_time == seqB.stop_time
+
+    def test_a_merge_takes_the_higher_priority_and_its_payload(self):
+        """A priority 1 absorbing a priority 2 becomes priority 2, with
+        the priority 2's payload; it keeps the first one's ID. Both merges
+        share this loop."""
+        proc = _bare_processor()
+        seqA = _make_seq("s1", "TargetA", start_min=0, duration_min=20)
+        seqB = _make_seq("s2", "TargetA", start_min=20, duration_min=30)
+        seqB.priority = 2
+        for seq, frames in ((seqA, "1"), (seqB, "2")):
+            section = ET.Element("AcquireVisCamScienceData")
+            ET.SubElement(section, "FramesPerCoadd").text = frames
+            seq.payload_params = {"AcquireVisCamScienceData": section}
+        cal = _make_calendar([seqA, seqB])
+
+        merged = proc._merge_similar_observations(cal).visits[0].sequences
+
+        assert [(s.id, s.priority) for s in merged] == [("s1", 2)]
+        assert merged[0].get_payload_parameter(
+            "AcquireVisCamScienceData", "FramesPerCoadd"
+        ) == "2"
+        # The input observations are left as they were.
+        assert (seqA.priority, seqB.priority) == (1, 2)
+
+    def test_a_lower_priority_merged_in_keeps_the_first(self):
+        proc = _bare_processor()
+        seqA = _make_seq("s1", "TargetA", start_min=0, duration_min=20)
+        seqB = _make_seq("s2", "TargetA", start_min=20, duration_min=30)
+        seqB.priority = 0
+        cal = _make_calendar([seqA, seqB])
+
+        merged = proc._merge_similar_observations(cal).visits[0].sequences
+
+        assert [(s.id, s.priority) for s in merged] == [("s1", 1)]
 
     def test_three_contiguous_merge_transitively(self):
         """A run of three contiguous sequences collapses to one."""
@@ -323,6 +358,46 @@ class TestProcessCalendarMergeKwarg:
         # Once on the long-term times ahead of the trims, once at the end.
         assert merged == [True, False]
         assert processed is not None
+
+    @pytest.mark.slow
+    @pytest.mark.parametrize("merge", [True, False])
+    def test_payload_counts_are_computed_once_after_the_final_merge(
+        self, monkeypatch, tmp_path, merge
+    ):
+        """SC_Integrations and NumTotalFramesRequested follow duration, so
+        they are computed after the last change to any start or stop."""
+        monkeypatch.setattr(
+            "shortschedule.scheduler.Visibility",
+            _DummyVisibilityAllTrue,
+        )
+        cal = self._load_sample()
+        sched = ScheduleProcessor("L1", "L2")
+        calls = []
+        original_merge = sched._merge_similar_observations
+        original_update = sched._update_payload_parameters
+
+        def _merge(calendar, verbose=False, before_trims=False):
+            calls.append("merge" if not before_trims else "early merge")
+            return original_merge(calendar, verbose, before_trims=before_trims)
+
+        def _update(calendar):
+            calls.append("payload")
+            return original_update(calendar)
+
+        monkeypatch.setattr(sched, "_merge_similar_observations", _merge)
+        monkeypatch.setattr(sched, "_update_payload_parameters", _update)
+
+        sched.process_calendar(
+            cal,
+            window_start=cal.visits[0].sequences[0].start_time.isot,
+            window_duration_days=1,
+            merge_similar_observations=merge,
+            log_path=tmp_path / "run",
+        )
+
+        assert calls == (
+            ["early merge", "merge", "payload"] if merge else ["payload"]
+        )
 
 
 # ================================================================

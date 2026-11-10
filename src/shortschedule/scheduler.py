@@ -18,7 +18,13 @@ observation around the time the long-term calendar chose for it rather
 than sliding observations to close gaps.
 """
 
-from .models import ObservationSequence, ScienceCalendar, Visit
+from .models import (  # BAD_NAME_SYMBOLS re-exported for existing imports
+    BAD_NAME_SYMBOLS,  # noqa: F401
+    ObservationSequence,
+    ScienceCalendar,
+    Visit,
+    clean_target_name,
+)
 from .nirda import NirdaData
 from .overhead import OverheadTiming
 from .roll import get_best_roll_per_visit
@@ -70,15 +76,6 @@ class _NullProgress:
     def close(self) -> None:
         pass
 
-
-# Characters that are not allowed in target name fields (``Target`` /
-# ``TargetID``) because they break downstream filename and identifier
-# handling. Each bad symbol is mapped to its safe replacement and substituted
-# by the ``fix_bad_data`` pass.
-BAD_NAME_SYMBOLS = {
-    "+": "_",
-    " ": "_",
-}
 
 # Tag names whose values are expected to be non-numeric (names, IDs,
 # timestamps, TLE lines). They are excluded from the NaN-like value scan run
@@ -329,12 +326,14 @@ class ScheduleProcessor:
             case it requires further SOC investigation and should not be
             allowed by the short-term scheduler. Set to 0 to disable clamping.
         grow_by_priority : bool, optional
-            Grow each visit's main target first, then the rest priority 2,
-            then 1, then 0, and let an observation take minutes from an
-            adjacent lower-ranked one (not a main target, or the same and a
-            lower priority) as long as that one keeps the minimum duration
-            and stays within ``max_movement_minutes`` (default True). False
-            grows in start-time order with every neighbor a hard bound.
+            Grow by rank: priority 2, then 1, then 0, and at equal priority
+            a visit's main target before its other targets (so within a
+            visit the main target grows first). Let an observation take
+            minutes from an adjacent lower-ranked one, or an equal-ranked
+            one in a later visit, as long as that one keeps the minimum
+            duration and stays within ``max_movement_minutes`` (default
+            True). False grows in start-time order with every neighbor a
+            hard bound.
         drop_priority0 : bool, optional
             With ``grow_by_priority``, let an observation take as much of
             an adjacent lower-ranked priority-0 one as its own visibility,
@@ -483,9 +482,9 @@ class ScheduleProcessor:
             self.occultation_visibility = Visibility(
                 tle_line1, tle_line2, **_occ_kw
             )
-        # Targets that keep the standard keepouts though not main. Held as
-        # written and cleaned, so either spelling of a name matches a
-        # target before or after _normalize_target_names.
+        # Targets that keep the standard keepouts though not main. Held
+        # cleaned, and every target is cleaned before it is compared, so
+        # either spelling matches before or after _normalize_target_names.
         if isinstance(occultation_overrides, str):
             occultation_overrides = [occultation_overrides]
         self.occultation_overrides = (
@@ -494,9 +493,7 @@ class ScheduleProcessor:
             else [str(name).strip() for name in occultation_overrides]
         )
         self._occultation_override_names = frozenset(
-            spelling
-            for name in self.occultation_overrides or ()
-            for spelling in (name, self._clean_name(name))
+            self._clean_name(name) for name in self.occultation_overrides or ()
         )
 
         self.min_sequence_duration = TimeDelta(8 * 60 * u.s)
@@ -682,13 +679,20 @@ class ScheduleProcessor:
         self._print(f"  Line 2: {self.tle_line2}")
 
         # Pick each visit's main target from the long-term calendar, before
-        # the window cuts any of its minutes. The flag rides on every copy.
-        self._mark_main_targets(calendar)
+        # the window cuts any of its minutes.
+        main_targets = self._mark_main_targets(calendar)
 
-        # Extract windowed calendar FIRST
+        # Extract windowed calendar FIRST. Every observation in it is a copy,
+        # so nothing below changes the caller's long-term calendar.
         windowed_calendar = self._extract_time_window(
             calendar, window_start, window_duration_days, verbose
         )
+
+        # Flag the main target on the copies; the flag rides on every later
+        # copy. Set before names are cleaned, while they still match.
+        for visit in windowed_calendar.visits:
+            for seq in visit.sequences:
+                seq.is_main = seq.target == main_targets.get(visit.id)
 
         # Normalize target names up front, so every pass and log line sees
         # the name the delivered calendar will carry.
@@ -714,16 +718,20 @@ class ScheduleProcessor:
         # Optionally merge back-to-back same-target sequences within each
         # visit. This second merge runs *after* all gap-filling, trimming,
         # and other duration/timing adjustments so it operates on the final
-        # scheduled boundaries. Because merging extends a sequence over its neighbor,
-        # the merged sequences' payload integration counts are recomputed
-        # for their new combined durations.
+        # scheduled boundaries.
         if merge_similar_observations:
             processed_calendar = self._merge_similar_observations(
                 processed_calendar, verbose
             )
-            processed_calendar = self._update_payload_parameters(
-                processed_calendar
-            )
+
+        # Payload overrides, then NIRDA SC_Integrations and VISDA
+        # NumTotalFramesRequested from each observation's duration. Done
+        # once, here, after the last change to any start or stop (the final
+        # merge), so the counts, the data volumes and the .diag report all
+        # match what is delivered.
+        processed_calendar = self._update_payload_parameters(
+            processed_calendar
+        )
 
         # Renumber visit and observation IDs sequentially. This runs last,
         # after any merges/time changes that may have dropped IDs, so the
@@ -826,7 +834,7 @@ class ScheduleProcessor:
     def _mark_main_targets(
         self, calendar: ScienceCalendar
     ) -> Dict[str, Optional[str]]:
-        """Choose each visit's main target and flag its observations.
+        """Choose each visit's main target.
 
         A visit's main target is its priority 1/2 target. With none, it is
         the target with the most minutes in the visit, skipping Gaia
@@ -840,8 +848,9 @@ class ScheduleProcessor:
         Parameters
         ----------
         calendar : ScienceCalendar
-            The long-term calendar, before any time is changed. Every
-            observation's ``is_main`` is set in place.
+            The long-term calendar, before any time is changed. It is not
+            modified; ``process_calendar`` sets ``is_main`` on its own
+            copies of the observations.
 
         Returns
         -------
@@ -890,16 +899,15 @@ class ScheduleProcessor:
             if main is not None:
                 self._print(f"Visit {visit.id}: main target {main}")
             main_targets[visit.id] = main
-            for seq in visit.sequences:
-                seq.is_main = main is not None and seq.target == main
 
         # An override naming no target is most likely a typo.
-        targets = {
-            seq.target for visit in calendar.visits for seq in visit.sequences
+        cleaned = {
+            self._clean_name(seq.target)
+            for visit in calendar.visits
+            for seq in visit.sequences
         }
-        cleaned = {self._clean_name(t) for t in targets}
         for name in getattr(self, "occultation_overrides", None) or ():
-            if name not in targets and self._clean_name(name) not in cleaned:
+            if self._clean_name(name) not in cleaned:
                 self._print(
                     f"WARNING: occultation_overrides names {name}, which is "
                     "not a target in the long-term calendar."
@@ -980,12 +988,13 @@ class ScheduleProcessor:
                     continue
                 cut_start = (window_start - seq.start_time).sec > 1e-3
                 cut_stop = (seq.stop_time - window_end).sec > 1e-3
+                # Always a copy: later passes change times, names and flags
+                # in place, and the caller's calendar must keep its own.
+                inside = seq.copy()
                 if not (cut_start or cut_stop):
-                    windowed_sequences.append(seq)
+                    windowed_sequences.append(inside)
                     continue
 
-                # Cut a copy, so the caller's calendar keeps its times.
-                inside = seq.copy()
                 if cut_start:
                     inside.start_time = window_start
                 if cut_stop:
@@ -1146,10 +1155,12 @@ class ScheduleProcessor:
         observation to a dark one of the same target across Free Time, so
         the dark time is trimmed rather than flown.
 
-        The merged sequence keeps the first sequence's identity, priority,
-        and payload parameters, and extends its ``stop_time`` to the second
-        sequence's ``stop_time``. Merging is applied transitively, so a run
-        of three or more eligible sequences collapses into one.
+        The merged sequence keeps the first sequence's identity and extends
+        its ``stop_time`` to the second sequence's ``stop_time``. It takes
+        the higher of the two priorities, and the payload parameters of the
+        sequence that had it (the first's on a tie). Merging is applied
+        transitively, so a run of three or more eligible sequences
+        collapses into one.
 
         Parameters
         ----------
@@ -1242,14 +1253,28 @@ class ScheduleProcessor:
                 ):
                     # Extend the previous (kept) sequence over this one.
                     previous = merged_sequences[-1]
+                    # The merged observation flies at the higher priority,
+                    # with that piece's payload so the two agree.
+                    raised = int(seq.priority or 0) > int(
+                        previous.priority or 0
+                    )
                     self._print(
                         f"{self._seq_prefix(visit.id, previous)} | MERGE"
                         f"{' (before trims)' if before_trims else ''}: "
                         f"absorbing sequence {seq.id} "
                         f"({self._seq_prefix(visit.id, seq)}); stop "
                         f"{previous.stop_time_str} -> {seq.stop_time_str}"
+                        + (
+                            f"; priority {previous.priority} -> "
+                            f"{seq.priority}, with its payload"
+                            if raised
+                            else ""
+                        )
                     )
                     previous.stop_time = seq.stop_time
+                    if raised:
+                        previous.priority = seq.priority
+                        previous.payload_params = seq.copy().payload_params
                     merged_count += 1
                 else:
                     # Copy so the returned calendar never aliases the input.
@@ -1477,7 +1502,8 @@ class ScheduleProcessor:
         windowed calendar, queries visibility for each sequence target and
         accumulates a boolean minute-array (`all_minutes_bool`) describing
         which minutes are visible. It then calls the visibility-fixing
-        and payload-update steps to produce the final calendar.
+        steps. Payload counts are left to ``process_calendar``, which
+        recomputes them after the final merge.
 
         Parameters
         ----------
@@ -1495,7 +1521,8 @@ class ScheduleProcessor:
         Returns
         -------
         ScienceCalendar
-            Calendar with adjusted sequences and updated payload parameters.
+            Calendar with adjusted sequences; payload parameters not yet
+            updated for the new durations.
         """
 
         working_calendar = deepcopy(calendar)
@@ -1690,11 +1717,9 @@ class ScheduleProcessor:
                 "calendar placed them)."
             )
 
-        # Report any timing changes (shrink/elongate) made above.
+        # Report any timing changes (shrink/elongate) made above. Payload
+        # counts are recomputed by process_calendar, after the final merge.
         self._log_timing_changes(working_calendar, original_timing)
-
-        # last thing is to update all the payload parameters
-        working_calendar = self._update_payload_parameters(working_calendar)
 
         return working_calendar
 
@@ -1843,9 +1868,7 @@ class ScheduleProcessor:
             True when it flies the standard keepouts though not main.
         """
         names = getattr(self, "_occultation_override_names", frozenset())
-        return bool(names) and (
-            target in names or self._clean_name(str(target)) in names
-        )
+        return self._clean_name(str(target)) in names
 
     def _below_minimum_duration(self, duration: TimeDelta) -> bool:
         """Checks if ``duration`` shorter than ``min_sequence_duration``
@@ -2290,9 +2313,10 @@ class ScheduleProcessor:
         - the schedule window, a hard boundary. Growth it stops while the
           target is still visible is reported as a warning.
 
-        With ``grow_by_priority`` the walk runs the main targets first,
-        then the rest priority 2, then 1, then 0 (see ``_growth_rank``),
-        and a lower-ranked neighbor is a soft bound: the grower
+        With ``grow_by_priority`` the walk runs priority 2, then 1, then 0,
+        the main target first at equal priority and the earlier visit first
+        at equal rank (see ``_growth_rank``), and a lower-ranked neighbor,
+        or an equal-ranked one in a later visit, is a soft bound: the grower
         may take its minutes while the neighbor keeps
         ``min_sequence_duration`` and the moved boundary stays within
         ``max_movement_minutes`` of the neighbor's long-term time. Growth
@@ -2305,12 +2329,20 @@ class ScheduleProcessor:
         Times are modified in place.
         """
         ordered = self._ordered_sequences(calendar)
+        # Long-term visit order, for the earlier-visit tie-break.
+        self._visit_order = {
+            visit.id: index for index, visit in enumerate(calendar.visits)
+        }
         walk = list(range(len(ordered)))
         if getattr(self, "grow_by_priority", False):
-            # Highest rank first; reverse sorting is stable, so start-time
-            # order holds within a rank.
+            # Highest rank first, then the earlier visit; reverse sorting is
+            # stable, so start-time order holds within a visit and rank.
             walk.sort(
-                key=lambda i: self._growth_rank(ordered[i][1]), reverse=True
+                key=lambda i: (
+                    self._growth_rank(ordered[i][1]),
+                    -self._visit_order.get(ordered[i][0], 0),
+                ),
+                reverse=True,
             )
         gained_starts = gained_stops = taken = 0
         # (visit_id, seq_id) of priority-0 observations eaten by growth.
@@ -2374,9 +2406,14 @@ class ScheduleProcessor:
     def _growth_rank(seq: ObservationSequence) -> Tuple[int, int]:
         """Where ``seq`` stands in growth under ``grow_by_priority``.
 
-        A visit's main target outranks every other observation; after
-        that, the higher priority ranks higher. Higher ranks grow first and
-        may take minutes from a lower-ranked neighbor.
+        The higher priority ranks higher; at equal priority a visit's main
+        target outranks any other target. Within a visit this is the same
+        as main target first, since a main target has its visit's highest
+        priority. Across visits priority decides, so a priority-0 main
+        target ranks below a priority-1 target of another visit. Higher
+        ranks grow first and may take minutes from a lower-ranked neighbor;
+        between equal ranks in different visits, the earlier visit may take
+        from the later one (see ``_grow_one_side``).
 
         Parameters
         ----------
@@ -2386,10 +2423,10 @@ class ScheduleProcessor:
         Returns
         -------
         tuple of int
-            ``(1 if main target else 0, priority)``; compare as tuples.
+            ``(priority, 1 if main target else 0)``; compare as tuples.
         """
         is_main = bool(getattr(seq, "is_main", False))
-        return int(is_main), int(seq.priority or 0)
+        return int(seq.priority or 0), int(is_main)
 
     def _grow_one_side(
         self,
@@ -2447,10 +2484,16 @@ class ScheduleProcessor:
             neighbor_original = original_timing.get(
                 (neighbor_visit, neighbor.id)
             )
+            # Lower ranked, or equal ranked in a later visit.
+            visit_order = getattr(self, "_visit_order", {})
             takeable = (
                 bool(getattr(self, "grow_by_priority", False))
                 and neighbor_original is not None
-                and self._growth_rank(neighbor) < self._growth_rank(seq)
+                and (
+                    self._growth_rank(neighbor),
+                    -visit_order.get(neighbor_visit, 0),
+                )
+                < (self._growth_rank(seq), -visit_order.get(visit_id, 0))
             )
             reach = (
                 neighbor.stop_time if direction < 0 else neighbor.start_time
@@ -4049,12 +4092,8 @@ class ScheduleProcessor:
 
         return sequence
 
-    @staticmethod
-    def _clean_name(name: str) -> str:
-        """Replace every :data:`BAD_NAME_SYMBOLS` character in *name*."""
-        for bad, good in BAD_NAME_SYMBOLS.items():
-            name = name.replace(bad, good)
-        return name
+    # Kept as a method; the rule lives in models so roll.py can share it.
+    _clean_name = staticmethod(clean_target_name)
 
     def _normalize_sequence_names(
         self, sequence: ObservationSequence, visit_id: Any = None

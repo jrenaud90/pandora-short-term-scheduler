@@ -28,7 +28,7 @@ from shortschedule.visualizer import ScheduleVisualizer
 # ---------------------------------------------------------------------------
 # Inputs — UPDATE ME between runs
 # ---------------------------------------------------------------------------
-xml_file_path = Path("N:\\","Joe Documents","Work Documents","Organizations","NASA - Pandora","Short Term Scheduler","WY47_2026-11-16","Longterm","Pandora_science_calendar_HD_29037_window_JPR_Edit - Copy.xml")
+xml_file_path = Path("N:\\","Joe Documents","Work Documents","Organizations","NASA - Pandora","Short Term Scheduler","WY47_2026-11-16","Longterm","Pandora_science_calendar_HD_29037_window_JPR_Edit2.xml")
 
 # Base name (without extension) used to label the output plots, e.g.
 # "Pandora_science_calendar".
@@ -46,10 +46,10 @@ plot_rolls = False
 # Spacecraft two-line element set (TLE) describing the orbit used for
 # visibility, power, and gap calculations. Refresh this for each new run.
 new_tle1 = (
-    "1 67395U 26004AJ  26312.73151079  .00000754  00000-0  87514-4 0  9994"
+    "1 67395U 26004AJ  26313.60555204  .00000768  00000-0  89111-4 0  9999"
 )
 new_tle2 = (
-    "2 67395  97.8123 309.2330 0005825  27.6787 332.4739 14.88257785 44777"
+    "2 67395  97.8122 310.0944 0005759  25.1088 335.0407 14.88259059 44902"
 )
 
 # ---------------------------------------------------------------------------
@@ -92,8 +92,8 @@ scheduler = ScheduleProcessor(
     transit_duration_constraint_min=15,  # visible minutes of the core a transit's priority-2 observations must keep; shrinks that break this are refused (0 turns it off)
     roll_step=1.0,  # roll search step size (deg)
     min_power_frac=0.68,  # min acceptable orbit-average power fraction
-    grow_by_priority=True,  # each visit's main target grows first, then the rest by priority; each may take time from lower-ranked neighbors
-    drop_priority0=True,  # let a priority 1/2 grow past (and drop) a priority 0, or merge across priority-0 filler
+    grow_by_priority=True,  # grow by priority (main target first at equal priority, earlier visit first at equal rank); each may take time from lower-ranked neighbors, or equal-ranked ones in a later visit
+    drop_priority0=True,  # let a higher-ranked observation grow past (and drop) a priority 0, or merge across priority-0 filler
     refine_edges_to_second=True,  # last pass: recheck the minute either side of every start/stop at 1 s and move it to the second the target is visible
     convert_single_roi_to_predefined=True,  # single auto-detect ROI -> predefined ROI at target RA/Dec
     fix_bad_data=True,  # replace invalid name symbols (e.g. "+") and report NaN-like values

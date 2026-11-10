@@ -8,6 +8,9 @@ every other keepout alone. Each visit's main target keeps the standard
 keepouts whatever its priority; everything else flies the stricter one.
 """
 
+# Standard library
+import xml.etree.ElementTree as ET
+
 # Third-party
 import matplotlib
 import numpy as np
@@ -91,7 +94,8 @@ class TestChoosingTheMainTarget:
         assert proc._mark_main_targets(
             ScienceCalendar(metadata={}, visits=[visit])
         ) == {"v1": "HD_29037"}
-        assert [s.is_main for s in visit.sequences] == [False, True]
+        # Chosen only; the long-term calendar is not flagged.
+        assert not any(s.is_main for s in visit.sequences)
 
     def test_priority_1_and_2_of_one_target_is_still_one_target(self):
         proc = _processor()
@@ -130,7 +134,6 @@ class TestChoosingTheMainTarget:
 
         # TOI-3714 has 60 minutes over two observations.
         assert main == {"v1": "TOI-3714"}
-        assert [s.is_main for s in visit.sequences] == [True, False, True]
         assert not any(m.startswith("WARNING") for m in proc.printed)
 
     def test_a_gaia_target_with_the_most_minutes_is_skipped(self):
@@ -200,7 +203,8 @@ class TestChoosingTheMainTarget:
     def test_chosen_on_the_long_term_calendar_before_the_window(
         self, monkeypatch
     ):
-        """A target mostly outside the window still wins on its minutes."""
+        """A target mostly outside the window still wins on its minutes,
+        and the flag lands on the windowed copies, not the input."""
         proc = _processor()
         visit = _visit(("A", 0, 100), ("B", 0, 40))
         cal = ScienceCalendar(metadata={}, visits=[visit])
@@ -212,13 +216,52 @@ class TestChoosingTheMainTarget:
             )
             raise RuntimeError("stop here")
 
-        monkeypatch.setattr(proc, "_extract_time_window", _stop)
+        monkeypatch.setattr(proc, "_analyze_original_calendar", _stop)
         monkeypatch.setattr(proc, "_setup_run_logging", lambda *a: None)
 
         with pytest.raises(RuntimeError, match="stop here"):
             proc.process_calendar(cal, window_start=T0 + 90 * u.min)
 
+        # A keeps only 10 of its 100 minutes inside the window.
         assert seen == {"A": True, "B": False}
+        assert not any(s.is_main for s in visit.sequences)
+
+    def test_processing_leaves_the_long_term_calendar_unchanged(
+        self, monkeypatch
+    ):
+        """Window cut, flags and name cleaning all act on copies."""
+        proc = _processor(fix_bad_data=True)
+        visit = _visit(("HD 1+2", 1, 100), ("B", 0, 40))
+        section = ET.Element("AcquireVisCamScienceData")
+        ET.SubElement(section, "TargetID").text = "HD 1+2"
+        visit.sequences[0].payload_params = {"AcquireVisCamScienceData": section}
+        cal = ScienceCalendar(metadata={"keep": 1}, visits=[visit])
+        before = [
+            (s.target, s.start_time.isot, s.stop_time.isot, s.is_main)
+            for s in visit.sequences
+        ]
+        seen = {}
+
+        def _stop(calendar, *args, **kwargs):
+            seen.update({s.target: s for s in calendar.visits[0].sequences})
+            raise RuntimeError("stop here")
+
+        monkeypatch.setattr(proc, "_analyze_original_visibility", _stop)
+        monkeypatch.setattr(proc, "_setup_run_logging", lambda *a: None)
+
+        with pytest.raises(RuntimeError, match="stop here"):
+            proc.process_calendar(cal, window_start=T0 + 90 * u.min)
+
+        # The copies were cut, flagged and renamed...
+        assert set(seen) == {"HD_1_2", "B"}
+        assert seen["HD_1_2"].is_main
+        # ...and the input was not.
+        assert [
+            (s.target, s.start_time.isot, s.stop_time.isot, s.is_main)
+            for s in visit.sequences
+        ] == before
+        assert section.find("TargetID").text == "HD 1+2"
+        assert cal.metadata == {"keep": 1}
 
     def test_the_flag_survives_a_copy(self):
         seq = _seq("s0", "A", 0)
@@ -507,6 +550,25 @@ class TestRollSweep:
         assert "nominal" in used
         assert "strict" not in used
 
+    @pytest.mark.parametrize(
+        "given, target", [("HD_1", "HD 1"), ("HD 1", "HD_1"), ("HD+1", "HD 1")]
+    )
+    def test_an_override_matches_on_cleaned_names(self, given, target):
+        """As in the scheduler, so the roll sweep and the timing passes
+        agree on the keepout even with fix_bad_data off."""
+        visit = Visit(
+            id="v1",
+            sequences=[
+                _seq("s0", target, 0),
+                _seq("s1", target, 0, start_min=60),
+            ],
+        )
+
+        used = self._sweep(visit, overrides=[given])
+
+        assert "nominal" in used
+        assert "strict" not in used
+
 
 class TestOverrides:
     """occultation_overrides: named targets keep the standard keepouts."""
@@ -569,7 +631,6 @@ class TestOverrides:
         assert proc._mark_main_targets(
             ScienceCalendar(metadata={}, visits=[visit])
         ) == {"v1": "A"}
-        assert [s.is_main for s in visit.sequences] == [True, False]
 
     def test_a_name_matching_no_target_is_a_warning(self):
         proc = _processor(occultation_overrides=["B", "TYPO", "HD 1"])

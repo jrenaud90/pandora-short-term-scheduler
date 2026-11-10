@@ -69,7 +69,10 @@ class TestExtraction:
         assert [seq.id for seq in kept] == [1, 2, 3]
         assert _off_by(kept[0].start_time, START) < 0.01
         assert _off_by(kept[0].stop_time, _at(75)) < 0.01
-        assert kept[1] is inside
+        # A copy, so later passes cannot change the long-term calendar.
+        assert kept[1] is not inside
+        assert _off_by(kept[1].start_time, inside.start_time) < 0.01
+        assert _off_by(kept[1].stop_time, inside.stop_time) < 0.01
         assert _off_by(kept[2].stop_time, END) < 0.01
         out = capsys.readouterr().out
         assert out.count("WARNING") == 2 and "WINDOW" in out
