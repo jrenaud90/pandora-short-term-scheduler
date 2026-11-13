@@ -93,7 +93,7 @@ class TestChoosingTheMainTarget:
 
         assert proc._mark_main_targets(
             ScienceCalendar(metadata={}, visits=[visit])
-        ) == {"v1": "HD_29037"}
+        ) == {"v1": ["HD_29037"]}
         # Chosen only; the long-term calendar is not flagged.
         assert not any(s.is_main for s in visit.sequences)
 
@@ -105,7 +105,7 @@ class TestChoosingTheMainTarget:
             ScienceCalendar(metadata={}, visits=[visit])
         )
 
-        assert main == {"v1": "TOI-544b"}
+        assert main == {"v1": ["TOI-544b"]}
         assert not any(m.startswith("ERROR") for m in proc.printed)
 
     def test_two_priority_1_or_2_targets_is_an_error_and_no_main(self):
@@ -116,7 +116,7 @@ class TestChoosingTheMainTarget:
             ScienceCalendar(metadata={}, visits=[visit])
         )
 
-        assert main == {"v1": None}
+        assert main == {"v1": []}
         assert not any(s.is_main for s in visit.sequences)
         errors = [m for m in proc.printed if m.startswith("ERROR")]
         assert len(errors) == 1
@@ -133,7 +133,7 @@ class TestChoosingTheMainTarget:
         )
 
         # TOI-3714 has 60 minutes over two observations.
-        assert main == {"v1": "TOI-3714"}
+        assert main == {"v1": ["TOI-3714"]}
         assert not any(m.startswith("WARNING") for m in proc.printed)
 
     def test_a_gaia_target_with_the_most_minutes_is_skipped(self):
@@ -144,7 +144,7 @@ class TestChoosingTheMainTarget:
             ScienceCalendar(metadata={}, visits=[visit])
         )
 
-        assert main == {"v1": "TOI-5349"}
+        assert main == {"v1": ["TOI-5349"]}
         warnings = [m for m in proc.printed if m.startswith("WARNING")]
         assert len(warnings) == 1
         assert GAIA in warnings[0] and "TOI-5349" in warnings[0]
@@ -157,7 +157,7 @@ class TestChoosingTheMainTarget:
             ScienceCalendar(metadata={}, visits=[visit])
         )
 
-        assert main == {"v1": None}
+        assert main == {"v1": []}
         assert not any(s.is_main for s in visit.sequences)
         assert any(
             m.startswith("WARNING") and "no main target" in m
@@ -170,7 +170,7 @@ class TestChoosingTheMainTarget:
 
         assert proc._mark_main_targets(
             ScienceCalendar(metadata={}, visits=[visit])
-        ) == {"v1": "TOI-5349"}
+        ) == {"v1": ["TOI-5349"]}
 
     def test_each_visit_has_its_own(self):
         proc = _processor()
@@ -182,8 +182,8 @@ class TestChoosingTheMainTarget:
             ],
         )
 
-        assert proc._mark_main_targets(cal) == {"v1": "A", "v2": "B"}
-        assert proc.main_targets == {"v1": "A", "v2": "B"}
+        assert proc._mark_main_targets(cal) == {"v1": ["A"], "v2": ["B"]}
+        assert proc.main_targets == {"v1": ["A"], "v2": ["B"]}
 
     @pytest.mark.parametrize(
         "name, gaia",
@@ -630,7 +630,68 @@ class TestOverrides:
 
         assert proc._mark_main_targets(
             ScienceCalendar(metadata={}, visits=[visit])
-        ) == {"v1": "A"}
+        ) == {"v1": ["A"]}
+
+    def test_a_priority_1_or_2_override_is_main_alongside_the_other(self):
+        """No error: the override and the visit's own priority 1/2 target
+        are both main."""
+        proc = _processor(occultation_overrides=["Titan"])
+        visit = _visit(("TOI-544b", 1, 60), ("Titan", 2, 20), ("G1234567", 0, 30))
+
+        main = proc._mark_main_targets(
+            ScienceCalendar(metadata={}, visits=[visit])
+        )
+
+        assert main == {"v1": ["TOI-544b", "Titan"]}
+        assert not any(m.startswith("ERROR") for m in proc.printed)
+
+    def test_two_other_priority_1_or_2_targets_still_an_error(self):
+        proc = _processor(occultation_overrides=["Titan"])
+        visit = _visit(("A", 1, 60), ("B", 2, 20), ("Titan", 2, 20))
+
+        main = proc._mark_main_targets(
+            ScienceCalendar(metadata={}, visits=[visit])
+        )
+
+        assert main == {"v1": ["Titan"]}
+        errors = [m for m in proc.printed if m.startswith("ERROR")]
+        assert len(errors) == 1 and "A, B" in errors[0]
+
+    def test_a_priority_1_or_2_override_alone_is_main(self):
+        proc = _processor(occultation_overrides=["Titan"])
+        visit = _visit(("HD_1", 0, 90), ("Titan", 2, 20))
+
+        assert proc._mark_main_targets(
+            ScienceCalendar(metadata={}, visits=[visit])
+        ) == {"v1": ["Titan"]}
+
+    def test_a_priority_0_override_is_not_main(self):
+        proc = _processor(occultation_overrides=["HD_29037"])
+        visit = _visit(("TOI-544b", 1, 30), ("HD_29037", 0, 90))
+
+        assert proc._mark_main_targets(
+            ScienceCalendar(metadata={}, visits=[visit])
+        ) == {"v1": ["TOI-544b"]}
+
+    def test_every_main_target_is_flagged_on_the_copies(self, monkeypatch):
+        proc = _processor(occultation_overrides=["Titan"])
+        visit = _visit(("TOI-544b", 1, 60), ("Titan", 2, 20), ("HD_1", 0, 30))
+        cal = ScienceCalendar(metadata={}, visits=[visit])
+        seen = {}
+
+        def _stop(calendar, *args, **kwargs):
+            seen.update(
+                {s.target: s.is_main for s in calendar.visits[0].sequences}
+            )
+            raise RuntimeError("stop here")
+
+        monkeypatch.setattr(proc, "_analyze_original_calendar", _stop)
+        monkeypatch.setattr(proc, "_setup_run_logging", lambda *a: None)
+
+        with pytest.raises(RuntimeError, match="stop here"):
+            proc.process_calendar(cal, window_start=T0, window_duration_days=1)
+
+        assert seen == {"TOI-544b": True, "Titan": True, "HD_1": False}
 
     def test_a_name_matching_no_target_is_a_warning(self):
         proc = _processor(occultation_overrides=["B", "TYPO", "HD 1"])

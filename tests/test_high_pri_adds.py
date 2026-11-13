@@ -1,10 +1,12 @@
 """Tests for add_high_pri_observations.
 
 After the final merge, the window's priority 1/2 targets get extra
-observations in idle time where they are visible, one new visit per target
-at the roll of its visit with the most minutes of it. Additions are
-priority 0, or 1 when they overlap a transit widened by a buffer. A target
-with too few additions gets none, and its time goes to the others.
+observations in idle time where they are visible. Each joins an existing
+visit, so the calendar stays in time order, and flies its target's roll in
+that visit (or the roll of its visit with the most minutes of it).
+Additions are priority 0, or 1 when they overlap a transit widened by a
+buffer. A target with too few additions gets none, and its time goes to
+the others.
 """
 
 # Standard library
@@ -83,28 +85,48 @@ def _processor(visible_by_ra, **kwargs):
     return proc
 
 
-def _added(calendar, n_original):
-    return calendar.visits[n_original:]
+def _added(calendar):
+    """Visit ID -> the additions it received, in time order."""
+    added = {}
+    for visit in calendar.visits:
+        seqs = [s for s in visit.sequences if getattr(s, "is_added", False)]
+        if seqs:
+            added[visit.id] = seqs
+    return added
 
 
-def _spans(visit):
+def _spans(sequences):
     return [
         (
             int(np.rint((s.start_time - T0).to_value(u.min))),
             int(np.rint((s.stop_time - T0).to_value(u.min))),
         )
-        for s in visit.sequences
+        for s in sequences
     ]
+
+
+def _assert_sequential(calendar):
+    """Each visit in time order, and no two visits interleave."""
+    for visit in calendar.visits:
+        starts = [s.start_time for s in visit.sequences]
+        assert starts == sorted(starts), visit.id
+    for first, second in zip(calendar.visits, calendar.visits[1:]):
+        assert max(s.stop_time for s in first.sequences) <= min(
+            s.start_time for s in second.sequences
+        ), (first.id, second.id)
 
 
 def test_off_by_default():
     assert ScheduleProcessor(TLE1, TLE2).add_high_pri_observations is False
 
 
-def test_idle_visible_time_is_filled_in_one_new_visit():
+def test_idle_visible_time_is_filled_into_the_existing_visits():
     """A, priority 1/2 in two visits, gets the idle time around everything
-    else at the roll of the visit holding more of it (the later one), in
-    pieces of at most 90 min. B, only priority 0, is not a candidate."""
+    else, in pieces of at most 90 min. The gap between the visits joins
+    0001 (a tie, so the visit before) at A's roll there; the time after
+    0002 joins 0002 at A's roll there. No visit is created. The payload
+    comes from the visit holding more of A (0002). B, only priority 0, is
+    not a candidate."""
     proc = _processor({10: _span(0, WINDOW_MIN), 50: _span(0, WINDOW_MIN)})
     calendar = ScienceCalendar(
         metadata={},
@@ -122,28 +144,151 @@ def test_idle_visible_time_is_filled_in_one_new_visit():
             ),
         ],
     )
+    calendar.visits[0].sequences[0].is_main = True
+    calendar.visits[1].sequences[0].is_main = True
     template = calendar.visits[1].sequences[0]
 
     proc._add_high_priority_observations(calendar)
 
-    added = _added(calendar, 2)
-    assert [visit.id for visit in added] == ["0003"]
-    assert _spans(added[0]) == [(40, 100), (130, 220), (220, 300)]
-    for seq in added[0].sequences:
+    assert [visit.id for visit in calendar.visits] == ["0001", "0002"]
+    added = _added(calendar)
+    assert {vid: _spans(seqs) for vid, seqs in added.items()} == {
+        "0001": [(40, 100)],
+        "0002": [(130, 220), (220, 300)],
+    }
+    assert [s.roll for s in added["0001"]] == [30.0]
+    assert [s.roll for s in added["0002"]] == [50.0, 50.0]
+    for seq in added["0001"] + added["0002"]:
         assert seq.target == "A"
         assert seq.priority == 0
-        assert seq.roll == 50.0
         assert seq.is_added and seq.is_main
         # A copy of the template's payload, not the same element.
         assert (
             seq.payload_params["AcquireVisCamScienceData"]
             is not template.payload_params["AcquireVisCamScienceData"]
         )
-    assert proc.high_priority_adds_visibility.asked == [(10, 50.0)]
+    assert proc.high_priority_adds_visibility.asked == [
+        (10, 30.0),
+        (10, 50.0),
+    ]
+    _assert_sequential(calendar)
     summary = proc.gap_report["processing_summary"]
-    assert summary["high_pri_added_visits"] == 1
+    assert summary["high_pri_added_visits"] == 2
     assert summary["high_pri_added_observations"] == 3
     assert summary["high_pri_added_minutes"] == 230
+
+
+def _gap_calendar():
+    """A in 0001 at roll 0; B, and A as priority 0 at roll 45, in 0002."""
+    calendar = ScienceCalendar(
+        metadata={},
+        visits=[
+            Visit(id="0001", sequences=[_seq("001", "A", 1, 0, 20, 10.0, 0.0)]),
+            Visit(
+                id="0002",
+                sequences=[
+                    _seq("001", "B", 1, 200, 220, 70.0, 0.0),
+                    _seq("002", "A", 0, 220, 230, 10.0, 45.0),
+                ],
+            ),
+        ],
+    )
+    calendar.visits[0].sequences[0].is_main = True
+    calendar.visits[1].sequences[0].is_main = True
+    return calendar
+
+
+def test_a_gap_on_a_tie_joins_the_visit_before():
+    """30-60 is closer to 0001, 150-180 closer to 0002: one each, so the
+    whole gap joins 0001, at A's roll and main flag there."""
+    proc = _processor(
+        {10: lambda m: _span(30, 60)(m) | _span(150, 180)(m), 70: _span(-9, -9)}
+    )
+    calendar = _gap_calendar()
+
+    proc._add_high_priority_observations(calendar)
+
+    added = _added(calendar)
+    assert list(added) == ["0001"]
+    assert _spans(added["0001"]) == [(30, 60), (150, 180)]
+    assert all(s.roll == 0.0 and s.is_main for s in added["0001"])
+    _assert_sequential(calendar)
+
+
+def test_a_gap_joins_the_visit_most_of_its_additions_are_closer_to():
+    """A third addition at 185-195, closer to 0002, tips the gap: all three
+    join 0002 at A's roll there (45), not main there. Every gap minute had
+    to be visible at both rolls, since either visit could take it."""
+    proc = _processor(
+        {
+            10: lambda m: _span(30, 60)(m)
+            | _span(150, 180)(m)
+            | _span(185, 195)(m),
+            70: _span(-9, -9),
+        }
+    )
+    calendar = _gap_calendar()
+
+    proc._add_high_priority_observations(calendar)
+
+    added = _added(calendar)
+    assert list(added) == ["0002"]
+    assert _spans(added["0002"]) == [(30, 60), (150, 180), (185, 195)]
+    assert all(s.roll == 45.0 and not s.is_main for s in added["0002"])
+    assert {roll for ra, roll in proc.high_priority_adds_visibility.asked} == {
+        0.0,
+        45.0,
+    }
+    # 0002 now starts at 30, after 0001 ends at 20.
+    _assert_sequential(calendar)
+    assert [s.target for s in calendar.visits[1].sequences] == [
+        "A",
+        "A",
+        "A",
+        "B",
+        "A",
+    ]
+
+
+@pytest.mark.parametrize("dark_roll", [0.0, 45.0])
+def test_a_gap_minute_must_be_visible_at_both_neighbors_rolls(dark_roll):
+    """Where A is visible at only one of its two rolls (0 in 0001, 45 in
+    0002), a gap minute is unusable: the gap might join either visit."""
+
+    class _ByRoll(_ScriptedVis):
+        @answers_visibility
+        def get_visibility(self, coord, times, roll):
+            minutes = np.rint((times - T0).to_value(u.min)).astype(int)
+            if int(round(coord.ra.deg)) != 10 or (
+                roll is not None and float(roll.to_value(u.deg)) == dark_roll
+            ):
+                return np.zeros(minutes.shape, dtype=bool)
+            return _span(30, 60)(minutes)
+
+    proc = _processor({})
+    proc.high_priority_adds_visibility = _ByRoll({})
+    calendar = _gap_calendar()
+
+    proc._add_high_priority_observations(calendar)
+
+    assert _added(calendar) == {}
+
+
+def test_before_the_first_observation_joins_the_first_visit():
+    proc = _processor({10: _span(0, 40)})
+    calendar = ScienceCalendar(
+        metadata={},
+        visits=[
+            Visit(
+                id="0001", sequences=[_seq("001", "A", 1, 100, 120, 10.0, 0.0)]
+            )
+        ],
+    )
+
+    proc._add_high_priority_observations(calendar)
+
+    assert _spans(_added(calendar)["0001"]) == [(0, 40)]
+    assert calendar.visits[0].sequences[0].is_added
 
 
 def test_a_slot_needs_the_minimum_and_both_ends_of_every_minute():
@@ -158,7 +303,7 @@ def test_a_slot_needs_the_minimum_and_both_ends_of_every_minute():
         ],
     )
     proc._add_high_priority_observations(calendar)
-    assert _spans(_added(calendar, 1)[0]) == [(150, 170)]
+    assert _spans(_added(calendar)["0001"]) == [(150, 170)]
 
     proc = _processor({10: _span(150, 169)})
     calendar = ScienceCalendar(
@@ -168,7 +313,7 @@ def test_a_slot_needs_the_minimum_and_both_ends_of_every_minute():
         ],
     )
     proc._add_high_priority_observations(calendar)
-    assert _spans(_added(calendar, 1)[0]) == [(150, 169)]
+    assert _spans(_added(calendar)["0001"]) == [(150, 169)]
 
 
 def test_never_overlaps_an_observation_ending_mid_minute():
@@ -179,7 +324,7 @@ def test_never_overlaps_an_observation_ending_mid_minute():
         metadata={}, visits=[Visit(id="0001", sequences=[observation])]
     )
     proc._add_high_priority_observations(calendar)
-    assert _spans(_added(calendar, 1)[0])[0][0] == 21
+    assert _spans(_added(calendar)["0001"])[0][0] == 21
 
 
 class _SecondsVis:
@@ -213,7 +358,7 @@ def test_additions_get_the_1_s_edge_pass():
 
     proc._add_high_priority_observations(calendar)
 
-    (addition,) = _added(calendar, 1)[0].sequences
+    (addition,) = _added(calendar)["0001"]
     assert (addition.start_time - T0).sec == pytest.approx(150 * 60 - 20)
     assert (addition.stop_time - T0).sec == pytest.approx(170 * 60 + 26)
     assert (original.stop_time - T0).sec == pytest.approx(20 * 60)
@@ -242,11 +387,65 @@ def test_a_thin_target_gives_its_time_to_the_others():
 
     proc._add_high_priority_observations(calendar)
 
-    added = _added(calendar, 2)
-    assert [visit.sequences[0].target for visit in added] == ["C"]
-    assert _spans(added[0]) == [(150, 180), (250, 262), (270, 282)]
+    added = _added(calendar)
+    assert list(added) == ["0002"]
+    assert {s.target for s in added["0002"]} == {"C"}
+    assert _spans(added["0002"]) == [(150, 180), (250, 262), (270, 282)]
     warnings = [m for m in proc.printed if m.startswith("WARNING")]
     assert any("A would get only 1" in m for m in warnings)
+
+
+def _two_targets(name="NGC 1433 SN"):
+    return ScienceCalendar(
+        metadata={},
+        visits=[
+            Visit(id="0001", sequences=[_seq("001", "A", 1, 0, 20, 10.0, 0.0)]),
+            Visit(
+                id="0002",
+                sequences=[_seq("001", name, 2, 20, 40, 70.0, 0.0)],
+            ),
+        ],
+    )
+
+
+@pytest.mark.parametrize(
+    "given, target",
+    [("NGC_1433_SN", "NGC 1433 SN"), ("NGC 1433 SN", "NGC_1433_SN")],
+)
+def test_an_excluded_target_gets_no_additions(given, target):
+    """Its time goes to the other target. Either spelling matches."""
+    visible = {10: _span(0, WINDOW_MIN), 70: _span(0, WINDOW_MIN)}
+    proc = _processor(visible, high_priority_adds_exclude=[given])
+    calendar = _two_targets(target)
+
+    proc._add_high_priority_observations(calendar)
+
+    added = _added(calendar)
+    assert list(added) == ["0002"]
+    assert {s.target for s in added["0002"]} == {"A"}
+    assert _spans(added["0002"]) == [(40, 130), (130, 220), (220, 300)]
+    assert [ra for ra, _ in proc.high_priority_adds_visibility.asked] == [10]
+    assert any(
+        f"{target} excluded" in m and not m.startswith("WARNING")
+        for m in proc.printed
+    )
+
+
+def test_an_exclude_naming_no_candidate_is_a_warning():
+    visible = {10: _span(0, WINDOW_MIN), 70: _span(0, WINDOW_MIN)}
+    proc = _processor(visible, high_priority_adds_exclude="Titan")
+    calendar = _two_targets()
+
+    proc._add_high_priority_observations(calendar)
+
+    assert proc.high_priority_adds_exclude == ["Titan"]
+    assert {s.target for s in _added(calendar)["0002"]} == {
+        "A",
+        "NGC 1433 SN",
+    }
+    warnings = [m for m in proc.printed if m.startswith("WARNING")]
+    assert len(warnings) == 2  # Titan, and the no-target_list_dir warning
+    assert any("Titan" in m for m in warnings)
 
 
 def test_a_padded_transit_goes_first_and_is_priority_1(monkeypatch):
@@ -275,21 +474,24 @@ def test_a_padded_transit_goes_first_and_is_priority_1(monkeypatch):
 
     proc._add_high_priority_observations(calendar)
 
+    added = [s for seqs in _added(calendar).values() for s in seqs]
     by_target = {
-        visit.sequences[0].target: visit for visit in _added(calendar, 2)
+        target: [s for s in added if s.target == target]
+        for target in ("A", "C")
     }
     priorities = {
         span: seq.priority
-        for span, seq in zip(_spans(by_target["A"]), by_target["A"].sequences)
+        for span, seq in zip(_spans(by_target["A"]), by_target["A"])
     }
     assert {span for span, p in priorities.items() if p == 1} == {
         (160, 190),
         (190, 220),
         (220, 250),
     }
-    assert all(seq.priority == 0 for seq in by_target["C"].sequences)
-    every = sorted(span for visit in by_target.values() for span in _spans(visit))
+    assert all(seq.priority == 0 for seq in by_target["C"])
+    every = sorted(_spans(added))
     assert all(a[1] <= b[0] for a, b in zip(every, every[1:]))
+    _assert_sequential(calendar)
     assert any(
         m.startswith("WARNING") and "C has no transit ephemeris" in m
         for m in proc.printed
@@ -305,7 +507,7 @@ def test_without_ephemerides_everything_is_priority_0_with_a_warning():
         ],
     )
     proc._add_high_priority_observations(calendar)
-    assert all(s.priority == 0 for s in _added(calendar, 1)[0].sequences)
+    assert all(s.priority == 0 for s in _added(calendar)["0001"])
     assert any("no target_list_dir" in m for m in proc.printed)
 
 
@@ -348,3 +550,12 @@ def test_header():
     assert on["High_Priority_Adds_Max_Duration_Min"] == "90"
     assert on["High_Priority_Adds_Min_Observations"] == "5"
     assert on["High_Priority_Adds_Transit_Buffer_Min"] == "40"
+    assert "High_Priority_Adds_Exclude" not in on
+
+    excluded = ScheduleProcessor(
+        TLE1,
+        TLE2,
+        add_high_pri_observations=True,
+        high_priority_adds_exclude=["Titan", "NGC_1433_SN"],
+    )._settings_for_header()
+    assert excluded["High_Priority_Adds_Exclude"] == "Titan,NGC_1433_SN"

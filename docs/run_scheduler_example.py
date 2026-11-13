@@ -28,7 +28,7 @@ from shortschedule.visualizer import ScheduleVisualizer
 # ---------------------------------------------------------------------------
 # Inputs — UPDATE ME between runs
 # ---------------------------------------------------------------------------
-xml_file_path = Path("Path", "To", "Pandora_science_calendar.xml")
+xml_file_path = Path("G:\\","Other computers","Joe Desktop","Work Documents","Organizations","NASA - Pandora","Short Term Scheduler","WY47_2026-11-16","Longterm","Pandora_science_calendar_HD_29037_window_JPR_Edit3.xml")
 
 # Base name (without extension) used to label the output plots, e.g.
 # "Pandora_science_calendar".
@@ -46,10 +46,10 @@ plot_rolls = False
 # Spacecraft two-line element set (TLE) describing the orbit used for
 # visibility, power, and gap calculations. Refresh this for each new run.
 new_tle1 = (
-    "1 67395U 26004AJ  26313.60555204  .00000768  00000-0  89111-4 0  9999"
+    "1 67395U 26004AJ  26314.21065720  .00000748  00000-0  86864-4 0  9996"
 )
 new_tle2 = (
-    "2 67395  97.8122 310.0944 0005759  25.1088 335.0407 14.88259059 44902"
+    "2 67395  97.8122 310.6907 0005707  23.2428 336.9045 14.88259735 44995"
 )
 
 # ---------------------------------------------------------------------------
@@ -75,7 +75,7 @@ scheduler = ScheduleProcessor(
     earthlimb_day_min=44,  # min Earth-limb angle, daytime (deg)
     earthlimb_night_min=13,  # min Earth-limb angle, nighttime (deg)
     occultation_earthlimb_min=69,  # if not `None`: min Earth-limb angle for every target except each visit's main target (its priority 1/2 target, else its non-Gaia target with the most minutes), so they can be used to dissipate heat. No day/night or dynamic illumination angle is used. All other keepouts are left the same.
-    occultation_overrides=['HD_29037', 'TOI-5349'],  # list of target names that fly the standard keepouts even when not their visit's main target. Growth order is unchanged (still by priority).
+    occultation_overrides=['HD_29037', 'TOI-5349', 'Titan', 'NGC_1433_SN'],  # list of target names that fly the standard keepouts even when not their visit's main target. Growth order is unchanged (still by priority).
     sun_min=91,  # min payload Sun keel angle (deg)
     moon_min=20,  # min payload Moon keel angle (deg)
     st_sun_min=50,  # min star-tracker Sun angle (deg)
@@ -87,15 +87,16 @@ scheduler = ScheduleProcessor(
     nirda_roi_x=80,  # NIRDA ROI columns (across the dispersion) the trace check counts light in
     nirda_roi_y=256,  # NIRDA ROI rows (along the dispersion) the trace check counts light in
     drop_observations_based_on_trace=False,  # a target whose every observable roll fails the trace check: True drops it from that visit (warning), False keeps it at its best ranked roll (error)
-    target_list_dir=Path("N:\\", "Joe Documents", "Gits", "PandoraTargetList"),  # PandoraTargetList checkout whose transit ephemerides hold priority-2 observations to their transits; None turns this off
+    target_list_dir=Path("C:\\", "Gits", "PandoraTargetList_og"),  # PandoraTargetList checkout whose transit ephemerides hold priority-2 observations to their transits; None turns this off
     transit_middle_frac=0.75,  # the middle fraction of each transit's duration (T14) that forms its core
     transit_duration_constraint_min=15,  # visible minutes of the core a transit's priority-2 observations must keep; shrinks that break this are refused (0 turns it off)
-    add_high_pri_observations=True,  # after everything else, fill idle time with extra observations of the week's priority 1/2 targets: one new visit per target, at the roll of its visit with the most minutes of it
+    add_high_pri_observations=True,  # after everything else, fill idle time with extra observations of the week's priority 1/2 targets, each added to the existing visit it falls in (a gap between visits joins the visit most of its additions are closer to), so the calendar stays in time order
     high_priority_adds_earthlimb_min=None,  # flat Earth-limb keepout (deg) for those additions; None uses the standard keepouts
     high_priority_adds_min_duration=10,  # shortest addition (minutes)
     high_priority_adds_max_duration=90,  # longest addition (minutes); longer idle stretches are split
     high_priority_adds_min_observations=3,  # a target with fewer additions gets none, and its time goes to the other targets
     high_priority_adds_transit_buffer_min=40,  # an addition overlapping T1 - this .. T4 + this is priority 1, otherwise 0
+    high_priority_adds_exclude=['Titan', 'NGC_1433_SN'],  # target names never given additions; None adds every priority 1/2 target
     roll_step=1.0,  # roll search step size (deg)
     min_power_frac=0.68,  # min acceptable orbit-average power fraction
     grow_by_priority=True,  # grow by priority (main target first at equal priority, earlier visit first at equal rank); each may take time from lower-ranked neighbors, or equal-ranked ones in a later visit
@@ -126,8 +127,7 @@ scheduler = ScheduleProcessor(
                 "SC_Groups": 2,
             },
             "AcquireVisCamScienceData": {
-                "StarRoiDimension": 75,
-                "FramesPerCoadd": 50
+                "StarRoiDimension": 75
             },
         },
         "Priority_1": {
@@ -148,8 +148,7 @@ scheduler = ScheduleProcessor(
                 "SC_Groups": 2,
             },
             "AcquireVisCamScienceData": {
-                "StarRoiDimension": 75,
-                "FramesPerCoadd": 50,
+                "StarRoiDimension": 75
             },
         },
         "Priority_2": {
@@ -168,8 +167,7 @@ scheduler = ScheduleProcessor(
                 "SC_Groups": 2,
             },
             "AcquireVisCamScienceData": {
-                "StarRoiDimension": 75,
-                "FramesPerCoadd": 50,
+                "StarRoiDimension": 75
             },
         },
     },

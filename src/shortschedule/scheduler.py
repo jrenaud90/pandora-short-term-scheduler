@@ -198,6 +198,7 @@ class ScheduleProcessor:
         high_priority_adds_max_duration: float = 90.0,
         high_priority_adds_min_observations: int = 5,
         high_priority_adds_transit_buffer_min: float = 40.0,
+        high_priority_adds_exclude: Optional[List[str]] = None,
     ) -> None:
         """
         Initialize the scheduler with TLE and parameters.
@@ -439,12 +440,16 @@ class ScheduleProcessor:
             as an error. 0 turns the constraint off.
         add_high_pri_observations : bool, optional
             After the final merge, fill idle time with extra observations
-            of the window's priority 1/2 targets, one new visit per target
-            appended to the calendar (default False). Each target flies
-            the roll of its original visit with the most minutes of it, and
-            the payload of its priority 1/2 observation there. Additions
-            cover only idle minutes where the target is visible at that
-            roll every minute; where targets compete, one in its padded
+            of the window's priority 1/2 targets (default False). Each
+            addition joins an existing visit, so the calendar stays in time
+            order: the visit it falls in, or for a gap between two visits,
+            the one most of the gap's additions sit closer to. An addition
+            flies its target's roll in that visit if the visit already has
+            the target, otherwise the roll of the target's visit with the
+            most minutes of it, and the payload of its priority 1/2
+            observation there. Additions cover only idle minutes where the
+            target is visible at that roll every minute; where targets
+            compete, one in its padded
             transit window wins, then the longest stretch. An addition is
             priority 1 when it overlaps the planet's T1-T4 widened by
             ``high_priority_adds_transit_buffer_min`` on each side, else
@@ -460,11 +465,16 @@ class ScheduleProcessor:
             Longest addition in minutes (default 90); a longer free,
             visible stretch is split.
         high_priority_adds_min_observations : int, optional
-            A target with fewer additions gets no visit, and its time is
-            offered to the other targets (default 5).
+            A target with fewer additions in the window gets none, and its
+            time is offered to the other targets (default 5).
         high_priority_adds_transit_buffer_min : float, optional
             Minutes added before T1 and after T4 for the priority-1 window
             (default 40).
+        high_priority_adds_exclude : list of str, optional
+            Target names never given additions. A name matches as written
+            or with its invalid symbols replaced (``+`` and space -> ``_``);
+            one that is not a priority 1/2 target in the window is a
+            warning. Default ``None``.
         """
         # Validate TLE format
         if not isinstance(tle_line1, str):
@@ -535,6 +545,13 @@ class ScheduleProcessor:
         )
         self.high_priority_adds_transit_buffer_min = (
             high_priority_adds_transit_buffer_min
+        )
+        if isinstance(high_priority_adds_exclude, str):
+            high_priority_adds_exclude = [high_priority_adds_exclude]
+        self.high_priority_adds_exclude = (
+            None
+            if high_priority_adds_exclude is None
+            else [str(name).strip() for name in high_priority_adds_exclude]
         )
         # Targets that keep the standard keepouts though not main. Held
         # cleaned, and every target is cleaned before it is compared, so
@@ -746,7 +763,7 @@ class ScheduleProcessor:
         # copy. Set before names are cleaned, while they still match.
         for visit in windowed_calendar.visits:
             for seq in visit.sequences:
-                seq.is_main = seq.target == main_targets.get(visit.id)
+                seq.is_main = seq.target in main_targets.get(visit.id, ())
 
         # Normalize target names up front, so every pass and log line sees
         # the name the delivered calendar will carry.
@@ -894,17 +911,19 @@ class ScheduleProcessor:
 
     def _mark_main_targets(
         self, calendar: ScienceCalendar
-    ) -> Dict[str, Optional[str]]:
-        """Choose each visit's main target.
+    ) -> Dict[str, List[str]]:
+        """Choose each visit's main targets.
 
         A visit's main target is its priority 1/2 target. With none, it is
         the target with the most minutes in the visit, skipping Gaia
         targets (``G`` followed by digits) with a warning when one of them
         has the most. A visit with two different priority 1/2 targets has
         no main target, which is an error; so does one with only Gaia
-        targets, with a warning. The main target always flies the standard
-        keepouts; every other target flies ``occultation_earthlimb_min``
-        when it is set.
+        targets, with a warning. A priority 1/2 target named in
+        ``occultation_overrides`` is a main target as well and does not
+        count toward that error, so a visit can have more than one. Main
+        targets always fly the standard keepouts; every other target flies
+        ``occultation_earthlimb_min`` when it is set.
 
         Parameters
         ----------
@@ -916,10 +935,10 @@ class ScheduleProcessor:
         Returns
         -------
         dict
-            Visit ID to its main target's name, or ``None`` when it has
-            none. Also kept as ``self.main_targets``.
+            Visit ID to the list of its main targets' names, empty when it
+            has none. Also kept as ``self.main_targets``.
         """
-        main_targets: Dict[str, Optional[str]] = {}
+        main_targets: Dict[str, List[str]] = {}
         for visit in calendar.visits:
             minutes: Dict[str, float] = {}
             science: List[str] = []
@@ -930,15 +949,25 @@ class ScheduleProcessor:
                 if seq.priority in (1, 2) and seq.target not in science:
                     science.append(seq.target)
 
+            # A priority 1/2 override is main whatever else is in the visit.
+            overridden = [t for t in science if self._overrides_occultation(t)]
+            science = [t for t in science if t not in overridden]
+            main = None
             if len(science) > 1:
-                main = None
                 self._print(
                     f"ERROR: Visit {visit.id}: {len(science)} different "
                     f"priority 1/2 targets ({', '.join(science)}); the visit "
-                    "has no main target."
+                    "has no main target"
+                    + (
+                        f" besides the override(s) {', '.join(overridden)}."
+                        if overridden
+                        else "."
+                    )
                 )
             elif science:
                 main = science[0]
+            elif overridden:
+                pass  # the overrides are the visit's main targets
             else:
                 # sorted() is stable, so a tie goes to the first listed.
                 ranked = sorted(minutes, key=lambda t: -minutes[t])
@@ -957,9 +986,12 @@ class ScheduleProcessor:
                             else "the visit has no main target."
                         )
                     )
-            if main is not None:
-                self._print(f"Visit {visit.id}: main target {main}")
-            main_targets[visit.id] = main
+            mains = ([main] if main is not None else []) + overridden
+            if mains:
+                self._print(
+                    f"Visit {visit.id}: main target(s) {', '.join(mains)}"
+                )
+            main_targets[visit.id] = mains
 
         # An override naming no target is most likely a typo.
         cleaned = {
@@ -1125,13 +1157,17 @@ class ScheduleProcessor:
         Runs after the final merge, so nothing already scheduled moves, and
         before the payload update, so the additions get their own
         integration and frame counts. Each target with a priority 1/2
-        observation in the window is a candidate. It flies the roll of its
+        observation in the window is a candidate, unless named in
+        ``high_priority_adds_exclude``. It flies the roll of its
         visit with the most minutes of it (the earlier visit on a tie) and
         the payload of its first priority 1/2 observation there, judged
-        under ``high_priority_adds_visibility``.
+        under ``high_priority_adds_visibility``, except in a visit that
+        already has the target, where it flies that visit's roll for it.
 
         A slot is a run of whole idle minutes in the window where the
-        target is visible at both ends of every minute, at least
+        target is visible at both ends of every minute, at the roll it
+        would fly in the visit before and the visit after (whichever it
+        joins), at least
         ``high_priority_adds_min_duration`` and at most
         ``high_priority_adds_max_duration`` long. Requiring every minute
         means the start buffers hold without a separate check. Slots are
@@ -1143,18 +1179,23 @@ class ScheduleProcessor:
         warning and the selection is redone without it, so its time can go
         to the others.
 
-        Each remaining target gets one new visit at the end of the
-        calendar. An addition is priority 1 when it overlaps the target's
-        T1-T4 widened by ``high_priority_adds_transit_buffer_min`` on each
-        side, else priority 0, and is flagged ``is_added`` (and
-        ``is_main``, as its visit's only target). With
+        Each addition joins an existing visit, so the calendar stays in
+        time order: inside a visit, that visit; in a gap between two
+        visits, every addition in the gap joins the same one, the visit
+        before or after, whichever more of them sit closer to (the visit
+        before on a tie). An addition is priority 1 when it overlaps the
+        target's T1-T4 widened by ``high_priority_adds_transit_buffer_min``
+        on each side, else priority 0, and is flagged ``is_added``; it is
+        ``is_main`` when its target is a main target of the visit it
+        joins. With
         ``refine_edges_to_second`` the additions then get the same 1 s edge
         pass as everything else (``added_only``), without a movement limit.
 
         Parameters
         ----------
         calendar : ScienceCalendar
-            The processed calendar; new visits are appended in place.
+            The processed calendar; additions are inserted into its visits
+            in place, each visit kept in time order.
 
         Returns
         -------
@@ -1170,21 +1211,71 @@ class ScheduleProcessor:
         min_length = int(np.ceil(self.high_priority_adds_min_duration - 1e-9))
         max_length = int(np.floor(self.high_priority_adds_max_duration + 1e-9))
 
-        # Minutes touched by any observation, sub-minute edges included.
+        # The observations already scheduled, in time order, with the
+        # minutes each touches (sub-minute edges included).
+        originals = sorted(
+            (
+                (visit, seq)
+                for visit in calendar.visits
+                for seq in visit.sequences
+            ),
+            key=lambda pair: pair[1].start_time,
+        )
+        spans = np.array(
+            [
+                (
+                    int(
+                        np.floor(
+                            (seq.start_time - window_start).to_value(u.min)
+                            + 1e-6
+                        )
+                    ),
+                    int(
+                        np.ceil(
+                            (seq.stop_time - window_start).to_value(u.min)
+                            - 1e-6
+                        )
+                    ),
+                )
+                for _, seq in originals
+            ],
+            dtype=int,
+        ).reshape(-1, 2)
         occupied = np.zeros(n_minutes, dtype=bool)
-        for visit in calendar.visits:
+        for first, last in spans:
+            occupied[max(first, 0) : max(min(last, n_minutes), 0)] = True
+
+        # For every minute, the observation before it and the one after it
+        # (indices into ``originals``, -1 for none). An addition joins one
+        # of those two visits, so it must be visible at the roll its target
+        # flies in either.
+        minute_index = np.arange(n_minutes)
+        before = (
+            np.searchsorted(
+                np.maximum.accumulate(spans[:, 1]) if len(spans) else [],
+                minute_index,
+                side="right",
+            )
+            - 1
+        )
+        after = np.searchsorted(spans[:, 0], minute_index + 1, side="left")
+        after[after >= len(originals)] = -1
+        position = {id(visit): k for k, visit in enumerate(calendar.visits)}
+        visit_before = np.array(
+            [-1 if k < 0 else position[id(originals[k][0])] for k in before],
+            dtype=int,
+        )
+        visit_after = np.array(
+            [-1 if k < 0 else position[id(originals[k][0])] for k in after],
+            dtype=int,
+        )
+
+        def _roll_in(target, visit, template):
+            # One roll per target per visit: the one it already flies there.
             for seq in visit.sequences:
-                first = int(
-                    np.floor(
-                        (seq.start_time - window_start).to_value(u.min) + 1e-6
-                    )
-                )
-                last = int(
-                    np.ceil(
-                        (seq.stop_time - window_start).to_value(u.min) - 1e-6
-                    )
-                )
-                occupied[max(first, 0) : max(min(last, n_minutes), 0)] = True
+                if seq.target == target:
+                    return seq.roll
+            return template.roll
 
         # Each candidate's source visit: the one with the most minutes of
         # it among those where it is priority 1/2, the earlier on a tie.
@@ -1205,6 +1296,28 @@ class ScheduleProcessor:
                 if target not in sources or rank > sources[target][0]:
                     sources[target] = (rank, science[0], visit.id)
 
+        # Targets the caller asked to leave out; a name matching none of
+        # the candidates is most likely a typo.
+        exclude = {
+            self._clean_name(name)
+            for name in getattr(self, "high_priority_adds_exclude", None) or ()
+        }
+        for name in getattr(self, "high_priority_adds_exclude", None) or ():
+            if not any(
+                self._clean_name(t) == self._clean_name(name) for t in sources
+            ):
+                self._print(
+                    f"WARNING: HIGH-PRI ADD: high_priority_adds_exclude names "
+                    f"{name}, which is not a priority 1/2 target in the "
+                    "window."
+                )
+        for target in [t for t in sources if self._clean_name(t) in exclude]:
+            self._print(
+                f"HIGH-PRI ADD: {target} excluded "
+                "(high_priority_adds_exclude)."
+            )
+            del sources[target]
+
         if not getattr(self, "transit_ephemerides", None) and sources:
             self._print(
                 "WARNING: HIGH-PRI ADD: no target_list_dir, so no transit is "
@@ -1213,18 +1326,28 @@ class ScheduleProcessor:
         model = self.high_priority_adds_visibility
         usable: Dict[str, np.ndarray] = {}
         in_window: Dict[str, np.ndarray] = {}
-        minute_index = np.arange(n_minutes)
         for target, (_, template, _) in sources.items():
-            roll = None if template.roll is None else template.roll * u.deg
-            visible = np.asarray(
-                model.get_visibility(
-                    SkyCoord(template.ra, template.dec, unit="deg", frame="icrs"),
-                    times,
-                    roll=roll,
-                )["visible"],
-                dtype=bool,
+            coord = SkyCoord(
+                template.ra, template.dec, unit="deg", frame="icrs"
             )
-            usable[target] = visible[:-1] & visible[1:]
+            at_roll: Dict[Any, np.ndarray] = {}
+            usable[target] = np.ones(n_minutes, dtype=bool)
+            for k, visit in enumerate(calendar.visits):
+                need = (visit_before == k) | (visit_after == k)
+                if not need.any():
+                    continue
+                roll = _roll_in(target, visit, template)
+                if roll not in at_roll:
+                    visible = np.asarray(
+                        model.get_visibility(
+                            coord,
+                            times,
+                            roll=None if roll is None else roll * u.deg,
+                        )["visible"],
+                        dtype=bool,
+                    )
+                    at_roll[roll] = visible[:-1] & visible[1:]
+                usable[target] &= ~need | at_roll[roll]
 
             # Minutes overlapping T1 - buffer .. T4 + buffer of any transit.
             in_window[target] = np.zeros(n_minutes, dtype=bool)
@@ -1299,37 +1422,63 @@ class ScheduleProcessor:
                 )
             excluded.update(thin)
 
-        next_visit = 1 + max(
-            (int(v.id) for v in calendar.visits if str(v.id).isdigit()),
-            default=0,
-        )
-        for target in sorted(
-            (t for t, adds in placed.items() if adds),
-            key=lambda t: min(placed[t]),
+        # Each addition joins a visit already in the calendar. All the
+        # additions in one idle gap join the same visit, so visits stay in
+        # time order: the visit before the gap or the one after it,
+        # whichever more of them sit closer to (the one before on a tie).
+        gaps: Dict[Tuple[int, int], List[Tuple[str, int, int, bool]]] = {}
+        for target, adds in placed.items():
+            for start, stop, has_transit in adds:
+                gaps.setdefault(
+                    (int(before[start]), int(after[stop - 1])), []
+                ).append((target, start, stop, has_transit))
+        number = 0
+        for (prev_k, next_k), adds in sorted(
+            gaps.items(), key=lambda item: min(add[1] for add in item[1])
         ):
-            _, template, source_visit = sources[target]
-            visit_id = f"{next_visit:04d}"
-            next_visit += 1
-            sequences = []
-            for number, (start, stop, has_transit) in enumerate(
-                sorted(placed[target]), start=1
+            if next_k < 0:
+                host = originals[prev_k][0]
+            elif prev_k < 0:
+                host = originals[next_k][0]
+            else:
+                closer_before = sum(
+                    start - spans[prev_k, 1] <= spans[next_k, 0] - stop
+                    for _, start, stop, _ in adds
+                )
+                host = originals[
+                    prev_k if 2 * closer_before >= len(adds) else next_k
+                ][0]
+            for target, start, stop, has_transit in sorted(
+                adds, key=lambda add: add[1]
             ):
+                _, template, source_visit = sources[target]
+                number += 1
                 seq = template.copy()
-                seq.id = f"{number:03d}"
+                # Unique until _renumber_ids numbers the visit in order.
+                seq.id = f"A{number:03d}"
                 seq.start_time = times[start]
                 seq.stop_time = times[stop]
                 seq.priority = 1 if has_transit else 0
-                seq.is_main = True
+                seq.roll = _roll_in(target, host, template)
+                seq.is_main = any(
+                    s.is_main for s in host.sequences if s.target == target
+                )
                 seq.is_added = True
-                sequences.append(seq)
+                host.sequences.append(seq)
                 self._print(
-                    f"{self._seq_prefix(visit_id, seq)} | HIGH-PRI ADD: "
+                    f"{self._seq_prefix(host.id, seq)} | HIGH-PRI ADD: "
                     f"{stop - start} min of idle time, priority "
                     f"{seq.priority}"
                     + (" (padded transit window)" if has_transit else "")
-                    + f", roll and payload from visit {source_visit}."
+                    + f", joined visit {host.id}"
+                    + (
+                        ""
+                        if seq.roll is None
+                        else f" at roll {seq.roll:.1f} deg"
+                    )
+                    + f", payload from visit {source_visit}."
                 )
-            calendar.visits.append(Visit(id=visit_id, sequences=sequences))
+            host.sequences.sort(key=lambda seq: seq.start_time)
 
         # The same 1 s edge pass as everything else, on the additions only.
         # They have no long-term time, so no movement limit.
@@ -1338,26 +1487,25 @@ class ScheduleProcessor:
         ):
             self._refine_edges_to_second(calendar, {}, added_only=True)
 
-        added_visits = [
-            visit
+        added = [
+            (visit.id, seq)
             for visit in calendar.visits
-            if any(getattr(seq, "is_added", False) for seq in visit.sequences)
+            for seq in visit.sequences
+            if getattr(seq, "is_added", False)
         ]
-        added_observations = sum(len(v.sequences) for v in added_visits)
+        added_visits = len({visit_id for visit_id, _ in added})
         added_minutes = round(
-            sum(s.duration.sec for v in added_visits for s in v.sequences)
-            / 60.0,
-            1,
+            sum(seq.duration.sec for _, seq in added) / 60.0, 1
         )
 
         if getattr(self, "gap_report", None):
             summary = self.gap_report["processing_summary"]
-            summary["high_pri_added_visits"] = len(added_visits)
-            summary["high_pri_added_observations"] = added_observations
+            summary["high_pri_added_visits"] = added_visits
+            summary["high_pri_added_observations"] = len(added)
             summary["high_pri_added_minutes"] = added_minutes
         self._print(
-            f"High-priority additions: {added_observations} observation(s), "
-            f"{added_minutes} min, in {len(added_visits)} new visit(s)."
+            f"High-priority additions: {len(added)} observation(s), "
+            f"{added_minutes} min, in {added_visits} existing visit(s)."
         )
         return calendar
 
@@ -5613,6 +5761,10 @@ class ScheduleProcessor:
             settings["High_Priority_Adds_Transit_Buffer_Min"] = (
                 f"{self.high_priority_adds_transit_buffer_min:g}"
             )
+            if getattr(self, "high_priority_adds_exclude", None):
+                settings["High_Priority_Adds_Exclude"] = ",".join(
+                    self.high_priority_adds_exclude
+                )
         # A keepout with no value is left out rather than written empty:
         # Occultation_Earthlimb_Min_Deg absent means it was not in use.
         return {k: v for k, v in settings.items() if v is not None}
